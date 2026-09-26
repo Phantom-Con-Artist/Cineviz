@@ -152,6 +152,11 @@ export type PhraseKind =
   | 'beam_clash'
   | 'air_combo'
   | 'power_up'
+  | 'mirror_clash'
+  | 'blade_lock'
+  | 'grapple'
+  | 'super'
+  | 'ultra'
   | 'finisher';
 
 export type CombatEventType =
@@ -189,7 +194,14 @@ export type CombatEventType =
   | 'summon_morph'
   | 'summon_launch'
   | 'summon_impact'
-  | 'summon_split';
+  | 'summon_split'
+  | 'tech_charge'
+  | 'tech_release'
+  | 'tech_hit'
+  | 'ultra_start'
+  | 'teleport'
+  | 'transform'
+  | 'lock';
 
 export interface CombatEvent {
   type: CombatEventType;

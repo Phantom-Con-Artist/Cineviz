@@ -124,7 +124,7 @@ export class MorphCloud {
     const M = orient(sm.yaw, sm.pitch, sm.roll, [0, 0, 0, 0, 0, 0, 0, 0, 0]);
     const S = sm.scale;
     let wield: number[] | null = null;
-    if (style === 'wield' && this.state === 'formed') {
+    if (style === 'wield' && sm.phase === 'wield' && this.state === 'formed') {
       // Frame on the owner's forearm: A along the arm, C across, B = C × A
       const j = owner.joints;
       const hx = j[J.rHand * 3], hy = j[J.rHand * 3 + 1], hz = j[J.rHand * 3 + 2];

@@ -16,6 +16,30 @@ export interface TeamColors {
 export const GOLD: RGB = [1.0, 0.72, 0.22];
 export const WHITE: RGB = [1, 1, 1];
 
+/** Energy colours per element: [body, hot core]. 'ki' uses the fighter's own palette. */
+const ELEMENT_COLORS: Record<string, [RGB, RGB]> = {
+  fire: [[1.6, 0.45, 0.1], [2.0, 1.3, 0.45]],
+  lightning: [[0.55, 0.8, 1.9], [1.7, 1.9, 2.3]],
+  dark: [[0.5, 0.12, 0.8], [1.5, 0.25, 0.45]],
+  blood: [[1.4, 0.06, 0.1], [2.0, 0.55, 0.4]],
+  holy: [[1.7, 1.4, 0.7], [2.2, 2.1, 1.6]],
+  glint: [[0.35, 0.65, 2.0], [1.3, 1.7, 2.4]],
+  wind: [[0.5, 1.4, 1.5], [1.6, 2.1, 2.1]],
+  rot: [[1.7, 0.3, 0.35], [2.1, 1.1, 0.5]],
+  gold: [[1.8, 1.25, 0.35], [2.2, 1.9, 1.0]],
+  rubber: [[1.5, 1.45, 1.4], [2.1, 2.1, 2.1]],
+};
+/** [body, hot] colours of an element for a fighter */
+export function elemCols(el: string | undefined, team: TeamColors): [RGB, RGB] {
+  return (el && ELEMENT_COLORS[el]) || [team.aura, team.hot];
+}
+/** A fighter's palette re-tinted by an element (identity stays in core / edge) */
+export function tinted(team: TeamColors, el: string | undefined): TeamColors {
+  if (!el || !ELEMENT_COLORS[el]) return team;
+  const [a, h] = ELEMENT_COLORS[el]!;
+  return { core: team.core, edge: team.edge, aura: a, hot: h };
+}
+
 /** The shared GPU buffers every cloud writes into */
 export interface Out {
   pos: Float32Array;

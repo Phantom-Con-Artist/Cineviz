@@ -32,11 +32,17 @@ const POOLS: Record<PhraseKind, ShotKind[]> = {
   summon: ['summon', 'wide', 'summon'],
   pet_assault: ['pet', 'medium', 'wide', 'pet'],
   finisher: ['requiem', 'hero', 'requiem'],
+  mirror_clash: ['medium', 'ots', 'close', 'medium'],
+  blade_lock: ['close', 'medium', 'hero', 'close'],
+  grapple: ['medium', 'tracking', 'close'],
+  super: ['hero', 'medium', 'wide', 'close', 'medium'],
+  ultra: ['wide', 'god', 'hero', 'summon', 'wide'],
 };
 
 const LETTERBOX: Record<PhraseKind, number> = {
   intro: 0.8, tension: 0.35, standoff: 0.55, exchange: 0, dash_clash: 0.4, weapon_duel: 0.25, clone_jutsu: 0.4,
   ki_barrage: 0.15, beam_clash: 1, air_combo: 0.3, power_up: 1, summon: 0.5, pet_assault: 0.3, finisher: 1,
+  mirror_clash: 0.15, blade_lock: 0.5, grapple: 0.2, super: 0.55, ultra: 1,
 };
 
 /** Critically damped spring (Unity-style SmoothDamp) */
@@ -100,6 +106,10 @@ export class Director {
   saturation = 0;
   speedLines = 0;
   shotLabel = 'ESTABLISHING';
+  /** Subtitle for a super move / ultra, and how long it has been showing (seconds) */
+  caption = '';
+  captionAge = 99;
+  captionUltra = false;
   shotNumber = 1;
 
   private shot: Shot = { kind: 'establish', subject: 0, age: 0, startYaw: 0, focus: new THREE.Vector3() };
@@ -192,6 +202,14 @@ export class Director {
         this.fovKick = 6;
         break;
       case 'clash':
+        if (e.intensity < 0.8) {
+          // Fists meeting in a mirror exchange: a jolt, not a set piece
+          this.shake(0.25 * e.intensity);
+          this.flash = Math.max(this.flash, 0.25);
+          this.chroma = Math.max(this.chroma, 0.4);
+          this.fovKick = -2;
+          break;
+        }
         this.bulletTime(0.1, 0.9);
         this.shake(0.9);
         this.flash = 1;
@@ -294,6 +312,63 @@ export class Director {
       case 'appear':
         this.bloom = 0.8;
         break;
+      case 'tech_charge':
+        this.caption = e.label ?? '';
+        this.captionAge = 0;
+        this.captionUltra = false;
+        this.override(eng, this.rngPick(['hero', 'close', 'medium']), e.fighter, false);
+        this.letterboxTarget = Math.max(this.letterboxTarget, 0.6);
+        this.bloom = Math.max(this.bloom, 0.6);
+        break;
+      case 'ultra_start':
+        this.caption = e.label ?? '';
+        this.captionAge = 0;
+        this.captionUltra = true;
+        this.override(eng, this.rngPick(['summon', 'summon', 'wide']), e.fighter, true);
+        this.letterboxTarget = 1;
+        this.bloom = 1.2;
+        this.shake(0.3);
+        this.bulletTime(0.4, 1.2);
+        break;
+      case 'tech_release':
+        // Pull back so the shot, its path and its target are all in frame
+        this.override(eng, eng.spectacle() ? 'summon' : this.rngPick(['medium', 'wide', 'tracking']), e.fighter, false);
+        this.shake(0.3 + e.intensity * 0.4);
+        this.fovKick = 6 * e.intensity;
+        this.flash = Math.max(this.flash, 0.4 * e.intensity);
+        this.chroma = Math.max(this.chroma, 0.6);
+        break;
+      case 'tech_hit':
+        if (e.intensity >= 0.8) {
+          this.bulletTime(0.14, 0.9);
+          this.shake(1);
+          this.flash = 1;
+          this.impactFrame = epic > 0.3 ? 0.08 : 0;
+          this.bloom = 1.4;
+          this.chroma = 1;
+          this.override(eng, 'orbit', e.target, false, e.pos);
+        } else {
+          this.shake(0.2 + e.intensity * 0.3);
+          this.chroma = Math.max(this.chroma, 0.4);
+          this.fovKick = -3;
+        }
+        break;
+      case 'teleport':
+        this.speedLines = 1;
+        this.chroma = Math.max(this.chroma, 0.5);
+        if (e.critical && Math.random() < 0.5) this.override(eng, 'orbit', e.fighter, false, e.pos);
+        break;
+      case 'transform':
+        this.bulletTime(0.35, 1.2 * e.intensity);
+        this.shake(0.6 * e.intensity);
+        this.flash = Math.max(this.flash, e.intensity);
+        this.bloom = 1.4;
+        if (e.intensity > 0.7) this.override(eng, 'hero', e.fighter, true);
+        break;
+      case 'lock':
+        this.shake(0.18);
+        this.chroma = Math.max(this.chroma, 0.35);
+        break;
       default:
         break;
     }
@@ -354,6 +429,7 @@ export class Director {
   update(dt: number, eng: CombatEngine, music: MusicState, prm: NormalizedParams, playing: boolean): void {
     this.prm = prm;
     this.clock += dt;
+    this.captionAge += dt;
     const epic = prm.epic;
 
     // Time: bullet time drops fast and recovers smoothly; afterwards the fight
@@ -601,6 +677,16 @@ export class Director {
         break;
       }
       case 'summon': {
+        const sp = eng.spectacle();
+        if (sp) {
+          // Frame the technique's centrepiece together with the fighters
+          w.fx = lerp(mx, sp.x, 0.5); w.fy = lerp(my, sp.y, 0.55); w.fz = lerp(mz, sp.z, 0.5);
+          w.yaw = A + side * (Math.PI / 2 + 0.3);
+          w.pitch = 0.08;
+          w.dist = Math.max(8, sp.r * 2.6 + d * 0.6);
+          w.fov = 44;
+          break;
+        }
         const sm = eng.summon;
         const big = sm.kind === 'building' || sm.kind === 'palm' || sm.kind === 'meteor';
         const ox = sm.active ? sm.x : sx, oy = sm.active ? sm.y : sy, oz = sm.active ? sm.z : sz;

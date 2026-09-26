@@ -6,7 +6,8 @@ import { MatchPalette, FighterPalette } from '../../rendering/palettes';
 import { Actor, CombatEngine, Fighter, NormalizedParams } from '../combat/CombatEngine';
 import { J } from '../combat/Skeleton';
 import { BodyCloud } from './BodyCloud';
-import { FxPool, GOLD, Out, R, RGB, rgb, TeamColors, unit, WHITE } from './common';
+import { elemCols, FxPool, GOLD, Out, R, RGB, rgb, TeamColors, tinted, unit, WHITE } from './common';
+import { TechRenderer } from './TechRenderer';
 import { MorphCloud } from './MorphCloud';
 import { PetCloud } from './PetCloud';
 import { WeaponCloud } from './WeaponCloud';
@@ -41,8 +42,9 @@ export class ParticleSystem {
   private readonly weapons: WeaponCloud[];
   private readonly petClouds: PetCloud[];
   private readonly morph: MorphCloud;
-  private readonly fx: FxPool;
-  private readonly sparks: FxPool;
+  readonly fx: FxPool;
+  readonly sparks: FxPool;
+  private readonly tech: TechRenderer;
   private readonly q: number;
   private cols: [TeamColors, TeamColors];
   private rippleIdx = 0;
@@ -82,6 +84,7 @@ export class ParticleSystem {
     this.out = { pos: this.positions, col: this.colors, size: this.sizes, alpha: this.alphas };
     const blank: TeamColors = { core: WHITE, edge: WHITE, aura: WHITE, hot: WHITE };
     this.cols = [blank, blank];
+    this.tech = new TechRenderer(this);
   }
 
   setPalette(p: MatchPalette): void {
@@ -118,11 +121,11 @@ export class ParticleSystem {
   }
 
   // ------------------------------------------------------------------ emitters
-  private n(count: number): number {
+  n(count: number): number {
     return Math.max(1, Math.round(count * (0.5 + this.q * 0.5)));
   }
 
-  private sparkBurst(p: number[], d: number[], count: number, speed: number, spread: number, c1: RGB, c2: RGB, life = 0.45, size = 1.3): void {
+  sparkBurst(p: number[], d: number[], count: number, speed: number, spread: number, c1: RGB, c2: RGB, life = 0.45, size = 1.3): void {
     for (let i = 0, n = this.n(count); i < n; i++) {
       unit(U);
       let dx = d[0]! + U[0]! * spread, dy = d[1]! + U[1]! * spread, dz = d[2]! + U[2]! * spread;
@@ -136,7 +139,7 @@ export class ParticleSystem {
   }
 
   /** Expanding ring of particles in the plane perpendicular to n */
-  private ring(p: number[], nx: number, ny: number, nz: number, count: number, speed: number, c: RGB, life = 0.5, size = 1.6, streak = false): void {
+  ring(p: number[], nx: number, ny: number, nz: number, count: number, speed: number, c: RGB, life = 0.5, size = 1.6, streak = false): void {
     const nl = Math.hypot(nx, ny, nz) || 1;
     nx /= nl; ny /= nl; nz /= nl;
     let ux: number, uy: number, uz: number;
@@ -154,7 +157,7 @@ export class ParticleSystem {
     }
   }
 
-  private sphere(p: number[], count: number, speed: number, c1: RGB, c2: RGB, life = 0.7, size = 1.8): void {
+  sphere(p: number[], count: number, speed: number, c1: RGB, c2: RGB, life = 0.7, size = 1.8): void {
     for (let i = 0, n = this.n(count); i < n; i++) {
       unit(U);
       const s = speed * Math.pow(R(), 0.5);
@@ -164,13 +167,13 @@ export class ParticleSystem {
     }
   }
 
-  private flare(p: number[], count: number, c: RGB, size = 22, life = 0.14): void {
+  flare(p: number[], count: number, c: RGB, size = 22, life = 0.14): void {
     for (let i = 0; i < count; i++) {
       this.fx.emit(p[0]! + (R() - 0.5) * 0.2, p[1]! + (R() - 0.5) * 0.2, p[2]! + (R() - 0.5) * 0.2, 0, 0, 0, life * (0.7 + R() * 0.6), c, size * (0.6 + R() * 0.7), 0, 0, 0, 2);
     }
   }
 
-  private debris(x: number, z: number, count: number, speed: number, c: RGB): void {
+  debris(x: number, z: number, count: number, speed: number, c: RGB): void {
     for (let i = 0, n = this.n(count); i < n; i++) {
       const a = R() * Math.PI * 2;
       const r = R() * 0.8;
@@ -179,7 +182,7 @@ export class ParticleSystem {
     }
   }
 
-  private dust(x: number, z: number, count: number, speed: number): void {
+  dust(x: number, z: number, count: number, speed: number): void {
     for (let i = 0, n = this.n(count); i < n; i++) {
       const a = R() * Math.PI * 2;
       const s = speed * (0.3 + R());
@@ -188,7 +191,7 @@ export class ParticleSystem {
   }
 
   /** Big explosion used by summon impacts */
-  private blast(p: number[], d: number[], A: TeamColors, D: TeamColors, epic: number, scale = 1): void {
+  blast(p: number[], d: number[], A: TeamColors, D: TeamColors, epic: number, scale = 1): void {
     this.sphere(p, 520 * epic * scale, 13 * scale, A.hot, A.aura, 1.1, 2.2);
     this.sparkBurst(p, [0, 0.6, 0], 240 * epic * scale, 18 * scale, 1.4, A.hot, D.aura, 0.8, 1.4);
     this.ring([p[0]!, 0.08, p[2]!], 0, 1, 0, 340 * scale, 13 * scale, A.aura, 0.9, 2, true);
@@ -227,7 +230,9 @@ export class ParticleSystem {
 
   // ------------------------------------------------------------------ events
   onEvent(e: CombatEvent, eng: CombatEngine, prm: NormalizedParams): void {
-    const A = this.cols[e.fighter] ?? this.cols[0];
+    const base = this.cols[e.fighter] ?? this.cols[0];
+    // Element-tinted energy (a reaper's dark cuts, a hunter's fire…); identity stays in core / edge
+    const A = e.sub ? tinted(base, e.sub) : base;
     const D = this.cols[e.target] ?? this.cols[1];
     const p = e.pos;
     const d = e.dir;
@@ -287,6 +292,13 @@ export class ParticleSystem {
         this.ghost(this.bodies[e.fighter]!, 1, 0.45, this.cols[e.fighter]!.aura, 0.8);
         break;
       case 'clash': {
+        if (e.intensity < 0.8) {
+          const k = e.intensity;
+          this.sparkBurst(p, [0, 0.5, 0], 110 * k * epic, 12, 1.4, A.hot, D.hot, 0.45, 1.2);
+          this.ring(p, d[0], d[1], d[2], 90 * k, 6, WHITE, 0.35, 1.5);
+          this.flare(p, 2, WHITE, 30 + 30 * k, 0.1);
+          break;
+        }
         this.sphere(p, 380 * epic, 12, A.hot, D.hot, 0.9, 2);
         this.sparkBurst(p, [0, 0.4, 0], 200 * epic, 18, 1.5 * chaos, A.aura, D.aura, 0.6, 1.4);
         this.ring(p, d[0], d[1], d[2], 260 * epic, 10, A.aura, 0.8, 2.2);
@@ -449,8 +461,8 @@ export class ParticleSystem {
       case 'summon_start': {
         const sm = eng.summon;
         const f = eng.fighters[e.fighter]!;
-        const gx = sm.style === 'topple' ? sm.x : f.x;
-        const gz = sm.style === 'topple' ? sm.z : f.z;
+        const gx = sm.style === 'topple' || sm.anchored ? sm.x : f.x;
+        const gz = sm.style === 'topple' || sm.anchored ? sm.z : f.z;
         this.morph.gather(sm, gx, gz);
         this.ring([gx, 0.08, gz], 0, 1, 0, 260, -6, A.aura, 1.2, 1.6, true);
         this.addRipple(gx, gz, 0.9);
@@ -467,7 +479,7 @@ export class ParticleSystem {
       case 'summon_impact': {
         const sm = eng.summon;
         this.morph.explode(p[0], p[1], p[2], d[0], d[2], false);
-        const big = sm.kind === 'building' || sm.kind === 'meteor' || sm.kind === 'plane' || sm.kind === 'torii';
+        const big = sm.kind === 'building' || sm.kind === 'meteor' || sm.kind === 'plane' || sm.kind === 'torii' || sm.anchored;
         this.blast(p, d, A, D, epic, big ? 1.25 : 1);
         if (e.critical) this.bodies[e.target]!.wound(p[0], p[1], p[2], d[0], 0.5, d[2], 1.1, 13);
         break;
@@ -477,6 +489,85 @@ export class ParticleSystem {
         this.sparkBurst(p, [0, 0.4, 0], 220 * epic, 16, 1.2, [1.6, 1.4, 1], D.aura, 0.7, 1.3);
         this.ring(p, d[0], 0, d[2], 200, 8, WHITE, 0.5, 1.8);
         this.flare(p, 6, WHITE, 60, 0.18);
+        break;
+
+      // ---------------------------------------------------------------- techniques
+      case 'tech_charge':
+      case 'ultra_start': {
+        const ult = e.type === 'ultra_start';
+        const [c1, c2] = elemCols(e.sub, base);
+        this.flare(p, 2, c1, ult ? 50 : 34, 0.16);
+        this.ring([p[0], 0.08, p[2]], 0, 1, 0, ult ? 360 : 150, ult ? 12 : 6, c1, 0.9, 1.7, true);
+        this.sphere(p, ult ? 260 : 100, ult ? 7 : 4, c2, c1, 0.8, 1.5);
+        if (ult) {
+          const f = eng.fighters[e.fighter]!;
+          for (let i = 0, n = this.n(500); i < n; i++) {
+            const a = R() * Math.PI * 2;
+            const r = Math.pow(R(), 0.6) * 1.2;
+            this.sparks.emit(f.x + Math.cos(a) * r, R() * 0.4, f.z + Math.sin(a) * r, Math.cos(a) * 0.8, 10 + R() * 18, Math.sin(a) * 0.8, 0.6 + R() * 0.9, R() < 0.5 ? c2 : c1, 1 + R() * 1.4, 0.6, -2, 0, 1.8);
+          }
+          this.debris(f.x, f.z, 140, 7, [0.6, 0.5, 0.55]);
+          this.addRipple(f.x, f.z, 1.8);
+        }
+        break;
+      }
+      case 'tech_release': {
+        const [c1, c2] = elemCols(e.sub, base);
+        this.flare(p, 3, c2, 30 + 40 * e.intensity, 0.14);
+        this.sparkBurst(p, d, 110 * e.intensity * epic, 13, 0.5, c2, c1, 0.4, 1.3);
+        this.ring(p, d[0], d[1], d[2], 100, 5, c1, 0.4, 1.5);
+        break;
+      }
+      case 'tech_hit': {
+        const big = e.intensity >= 0.8;
+        if (big) this.blast(p, d, A, D, epic, 1.15);
+        else {
+          this.sphere(p, 170 * e.intensity * epic, 7, A.hot, A.aura, 0.6, 1.6);
+          this.sparkBurst(p, d, 90 * e.intensity * epic, 11, 0.9 * chaos, A.hot, A.aura, 0.4, 1.2);
+          this.ring(p, d[0], d[1], d[2], 70, 5, A.aura, 0.4, 1.5);
+          this.flare(p, 2, A.hot, 30);
+        }
+        this.bodies[e.target]!.wound(p[0], p[1], p[2], d[0], 0.4, d[2], big ? 1.2 : 0.5, big ? 13 : 6);
+        break;
+      }
+      case 'teleport': {
+        const body = this.bodies[e.fighter]!;
+        if (!e.critical) {
+          this.ghost(body, 1, 0.5, base.aura, 0.85);
+          this.ring(p, 0, 1, 0, 70, 4, base.aura, 0.3, 1.3);
+        } else {
+          this.sphere(p, 90, 3.5, base.hot, base.aura, 0.4, 1.3);
+          this.ring([p[0], 0.08, p[2]], 0, 1, 0, 90, 5, base.aura, 0.4, 1.3, true);
+          this.flare(p, 2, base.hot, 34, 0.1);
+        }
+        break;
+      }
+      case 'transform': {
+        const [c1, c2] = elemCols(e.sub, base);
+        const f = eng.fighters[e.fighter]!;
+        const k = e.intensity;
+        if (k < 0.6) {
+          // A weapon buff: flames licking up the blade
+          this.sparkBurst(p, [0, 1, 0], 120, 7, 0.6, c2, c1, 0.6, 1.3);
+          this.flare(p, 2, c2, 36);
+          break;
+        }
+        for (let i = 0, n = this.n(700 * k); i < n; i++) {
+          const a = R() * Math.PI * 2;
+          const r = Math.pow(R(), 0.6) * 0.8;
+          this.sparks.emit(f.x + Math.cos(a) * r, R() * 0.5, f.z + Math.sin(a) * r, Math.cos(a) * 0.6, 8 + R() * 16, Math.sin(a) * 0.6, 0.6 + R() * 0.9, R() < 0.5 ? c2 : c1, 1 + R() * 1.4, 0.6, -2, 0, 1.8);
+        }
+        this.ring([f.x, 0.08, f.z], 0, 1, 0, 380 * k, 12, c1, 1, 2, true);
+        this.sphere(p, 260 * k, 8, c2, c1, 1, 2);
+        this.flare(p, 3, c1, 50, 0.2);
+        this.debris(f.x, f.z, 100 * k, 7, [0.6, 0.5, 0.45]);
+        this.addRipple(f.x, f.z, 1.6 * k);
+        break;
+      }
+      case 'lock':
+        this.sparkBurst(p, [0, 0.6, 0], 100 * epic, 12, 1.3, A.hot, D.hot, 0.5, 1.2);
+        this.ring(p, d[0], d[1], d[2], 80, 5, WHITE, 0.35, 1.4);
+        this.flare(p, 2, WHITE, 44, 0.12);
         break;
       default:
         break;
@@ -560,6 +651,18 @@ export class ParticleSystem {
 
     this.emitProjectiles(eng);
     this.emitBeams(eng, t);
+    this.tech.update(dt, eng, this.cols);
+    if (eng.lock.active) {
+      // Sparks pouring off two weapons grinding against each other
+      const lp = [eng.lock.x, eng.lock.y, eng.lock.z];
+      const [ca, cb] = this.cols;
+      for (let i = 0, n = this.n(24); i < n; i++) {
+        unit(U);
+        const s = 3 + R() * 9;
+        this.sparks.emit(lp[0]!, lp[1]!, lp[2]!, U[0]! * s, U[1]! * s + 2, U[2]! * s, 0.25 + R() * 0.3, R() < 0.5 ? ca.hot : cb.hot, 1 + R(), 2, 6, 1, 1.6);
+      }
+      this.flare(lp, 1, WHITE, 26 + Math.sin(t * 30) * 8, 0.05);
+    }
     this.ambient(dt, music, prm, eng);
 
     this.fx.update(dt, o);
@@ -573,15 +676,27 @@ export class ParticleSystem {
   private emitAura(a: Actor, body: BodyCloud, c: TeamColors, level: number, dt: number): void {
     const f = a instanceof Fighter ? a : null;
     const sup = f?.superMode ?? 0;
-    const want = (level * 280 + sup * 250) * dt * (0.4 + this.q * 0.6);
+    const form = f?.form ?? null;
+    const [fc1, fc2] = form ? elemCols(form, c) : [c.aura, c.hot];
+    const want = (level * 280 + sup * 250 + (form ? 420 : 0)) * dt * (0.4 + this.q * 0.6);
     let n = Math.floor(want) + (R() < want % 1 ? 1 : 0);
     const bright = 1.2 + level * 0.8;
+    // Transformations change the aura's character: flames, smoke, steam
+    const up = form === 'fire' ? 2.2 : form === 'rubber' ? 0.5 : form === 'dark' || form === 'rot' ? 0.9 : 1;
+    const sz = form === 'rubber' ? 2.2 : form === 'dark' || form === 'rot' ? 1.6 : form === 'fire' ? 1.3 : 1;
     while (n-- > 0) {
       const i = (R() * body.n) | 0;
       if (body.kind[i] === 1) continue;
       const x = body.pos[i * 3], y = body.pos[i * 3 + 1], z = body.pos[i * 3 + 2];
-      const col = sup > 0 && R() < 0.6 ? GOLD : R() < 0.25 ? c.hot : c.aura;
-      this.fx.emit(x, y, z, (R() - 0.5) * 0.5, 0.8 + R() * 1.8 * (0.5 + level), (R() - 0.5) * 0.5, 0.35 + R() * 0.65, col, 0.8 + R() * 1.3, 1.2, -1.6, 0, bright);
+      const col = form ? (R() < 0.4 ? fc2 : fc1) : sup > 0 && R() < 0.6 ? GOLD : R() < 0.25 ? c.hot : c.aura;
+      this.fx.emit(x, y, z, (R() - 0.5) * 0.5, (0.8 + R() * 1.8 * (0.5 + level)) * up, (R() - 0.5) * 0.5, 0.35 + R() * 0.65, col, (0.8 + R() * 1.3) * sz, 1.2, -1.6, 0, form === 'rubber' ? 0.9 : bright);
+    }
+    if (form === 'lightning' || form === 'holy' || form === 'dark') {
+      for (let k = 0; k < 2; k++) {
+        const i = (R() * body.n) | 0;
+        unit(U);
+        this.sparks.emit(body.pos[i * 3], body.pos[i * 3 + 1], body.pos[i * 3 + 2], U[0]! * 6, U[1]! * 6, U[2]! * 6, 0.1, form === 'dark' ? [1.6, 0.15, 0.25] : fc2, 1, 4, 0, 0, 1.7);
+      }
     }
     if (sup > 0 && R() < 0.5) {
       const i = (R() * body.n) | 0;
@@ -626,9 +741,15 @@ export class ParticleSystem {
   private readonly wp = [0, 0, 0];
   private slashTrail(f: Fighter, w: WeaponCloud, c: TeamColors, beat: number): void {
     if (!f.weaponOn || beat < f.swingFrom || beat > f.swingTo) return;
+    // Trails in the style's element: dark for a reaper, blood for a dancer, fire for a hunter…
+    const [e1, e2] = elemCols(f.bladeElement ?? f.arch.element, c);
     for (let i = (R() * 3) | 0; i < w.n; i += 3) {
       w.point(i, this.wp);
-      this.fx.emit(this.wp[0]!, this.wp[1]!, this.wp[2]!, 0, 0, 0, 0.16, i % 2 ? c.aura : c.hot, 1.1, 0, 0, 0, 1.3);
+      this.fx.emit(this.wp[0]!, this.wp[1]!, this.wp[2]!, 0, 0, 0, 0.16, i % 2 ? e1 : e2, 1.1, 0, 0, 0, 1.3);
+    }
+    if (f.bladeElement === 'fire' && R() < 0.8) {
+      w.point((R() * w.n) | 0, this.wp);
+      this.fx.emit(this.wp[0]!, this.wp[1]!, this.wp[2]!, 0, 1.5, 0, 0.4, R() < 0.5 ? e2 : e1, 1.6, 1, -1, 0, 1.4);
     }
   }
 

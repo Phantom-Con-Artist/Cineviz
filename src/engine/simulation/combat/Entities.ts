@@ -182,19 +182,22 @@ export const TRAIL_STEP = 0.1;
 /** Things the particles can become */
 export type SummonKind =
   | 'car' | 'plane' | 'building' | 'palm' | 'coconuts' | 'missiles'
-  | 'sword' | 'hammer' | 'guitar' | 'meteor' | 'shark' | 'duck' | 'ufo' | 'torii';
+  | 'sword' | 'hammer' | 'guitar' | 'meteor' | 'shark' | 'duck' | 'ufo' | 'torii'
+  | 'colossus' | 'fist';
 
 /**
  * How a summon reaches its target:
  *  throw — hurled end over end · fly — flies nose-first along a curve
  *  fall — drops out of the sky · topple — rises next to the target and falls onto it
  *  volley — splits into many pieces that fly one after another · wield — swung as a giant weapon
+ *  avatar — a colossus standing guard behind its master
  */
-export type FlightStyle = 'throw' | 'fly' | 'fall' | 'topple' | 'volley' | 'wield';
+export type FlightStyle = 'throw' | 'fly' | 'fall' | 'topple' | 'volley' | 'wield' | 'avatar';
 
 export const SUMMON_STYLE: Record<SummonKind, FlightStyle> = {
   car: 'throw', plane: 'fly', building: 'topple', palm: 'topple', coconuts: 'volley', missiles: 'volley',
   sword: 'wield', hammer: 'wield', guitar: 'wield', meteor: 'fall', shark: 'fly', duck: 'fall', ufo: 'fly', torii: 'fall',
+  colossus: 'avatar', fist: 'fall',
 };
 export const SUMMON_KINDS = Object.keys(SUMMON_STYLE) as SummonKind[];
 
@@ -208,6 +211,8 @@ export class Summon {
   /** Bumped whenever the shape changes, so the particle cloud re-samples it */
   version = 0;
   phase: SummonPhase = 'free';
+  /** Placed by a technique: stays where it formed instead of hovering over its owner */
+  anchored = false;
   x = 0; y = 0; z = 0;
   yaw = 0;
   pitch = 0;

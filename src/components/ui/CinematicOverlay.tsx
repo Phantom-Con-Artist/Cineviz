@@ -26,6 +26,7 @@ export const CinematicOverlay: React.FC<CinematicOverlayProps> = ({ bridge }) =>
   const status = useRef<HTMLDivElement>(null);
   const title = useRef<HTMLDivElement>(null);
   const sub = useRef<HTMLDivElement>(null);
+  const caption = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!bridge) return;
@@ -42,6 +43,15 @@ export const CinematicOverlay: React.FC<CinematicOverlayProps> = ({ bridge }) =>
         lines.current.style.transform = `rotate(${(performance.now() * 0.05) % 360}deg) scale(1.6)`;
       }
       if (shot.current) shot.current.textContent = `CAM ${String(d.shotNumber).padStart(2, '0')} • ${d.shotLabel}`;
+      if (caption.current) {
+        // A film subtitle, not a game banner: small, low, and gone in a few seconds
+        const age = d.captionAge;
+        const hold = d.captionUltra ? 3.6 : 2.4;
+        const a = Math.min(1, age / 0.35) * Math.max(0, Math.min(1, (hold - age) / 0.6));
+        caption.current.style.opacity = String(a);
+        if (caption.current.textContent !== d.caption) caption.current.textContent = d.caption;
+        caption.current.style.letterSpacing = `${0.35 + Math.min(1, age / hold) * 0.25}em`;
+      }
       const st = bridge.getShowState();
       const text = STATE_TEXT[st];
       if (status.current) status.current.style.opacity = text ? '1' : '0';
@@ -73,6 +83,11 @@ export const CinematicOverlay: React.FC<CinematicOverlayProps> = ({ bridge }) =>
       {/* Letterbox */}
       <div ref={top} className="absolute top-0 inset-x-0 bg-black" style={{ height: 0 }} />
       <div ref={bottom} className="absolute bottom-0 inset-x-0 bg-black" style={{ height: 0 }} />
+
+      {/* Technique subtitle, sitting in the lower letterbox bar */}
+      <div className="absolute inset-x-0 bottom-[3.5%] flex justify-center">
+        <div ref={caption} className="font-mono uppercase text-[10px] sm:text-xs text-white/80 opacity-0" style={{ textShadow: '0 0 12px rgba(255,255,255,0.35)' }} />
+      </div>
 
       {/* Before / after the show */}
       <div ref={status} className="absolute inset-0 flex flex-col items-center justify-center transition-opacity duration-700 opacity-0">

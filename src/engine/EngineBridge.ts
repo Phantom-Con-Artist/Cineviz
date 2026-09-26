@@ -35,6 +35,10 @@ export class EngineBridge {
   public analyzing = false;
 
   private seed = 42819;
+  /** Seed of the current show: fresh every time a song starts over, unless the choreography is locked */
+  private showSeed = 42819;
+  /** Replay the exact same fight every time (?lock) */
+  public lockChoreography = false;
   private params: NormalizedParams = normalize(DEFAULT_CREATIVE_PARAMETERS);
   private trackId = -1;
   private analysis: SongAnalysis | null = null;
@@ -77,12 +81,19 @@ export class EngineBridge {
     const q = new URLSearchParams(window.location.search);
     this.combat.forcePhrase = (q.get('phrase') as never) || null;
     this.combat.forceSummon = (q.get('summon') as never) || null;
+    this.combat.forceTech = (q.get('tech') as never) || null;
+    const arch = (q.get('arch') ?? '').split(',');
+    this.combat.forceArch = [(arch[0] as never) || null, (arch[1] as never) || null];
+    if (q.get('seed')) this.seed = Number(q.get('seed')) | 0;
+    this.lockChoreography = q.has('lock');
     this.initSimulation();
   }
 
   public initSimulation(): void {
-    this.palette = paletteForSeed(this.seed);
-    this.combat.init(this.seed);
+    // Every show is a new fight: new archetypes, pets, colours, choreography
+    this.showSeed = this.lockChoreography ? this.seed : (this.seed ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0;
+    this.palette = paletteForSeed(this.showSeed);
+    this.combat.init(this.showSeed);
     this.combat.setPlan(this.buildPlan());
     this.particles.setPalette(this.palette);
     this.particles.reset();
@@ -169,10 +180,12 @@ export class EngineBridge {
         this.ended = true;
         this.combat.finish();
       } else if (!playing && this.music.time < 0.05 && !this.ended) {
-        // Stopped: back to the empty arena
+        // Stopped: back to the empty arena — the next play is a new fight
         this.combat.stop();
-        this.particles.reset();
-        this.director.reset();
+        this.initSimulation();
+      } else if (playing && this.music.analyzed && songBeat < 4 && this.combat.beat > 24) {
+        // Played again from the top: a new fight
+        this.initSimulation();
       } else if (this.music.analyzed && Math.abs(songBeat - this.combat.beat) > 6 && !this.ended) {
         this.combat.resync(songBeat);
       }

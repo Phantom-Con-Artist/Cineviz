@@ -57,6 +57,108 @@ function weaponShape(type: WeaponType, out: number[]): number {
       out[0] = end + U[0]! * 0.09; out[1] = U[1]! * 0.09; out[2] = U[2]! * 0.09;
       return 2.0;
     }
+    case 'katana': {
+      // Long tsuka, round tsuba, thin gently curved blade
+      if (r < 0.2) { out[0] = -0.3 + R() * 0.38; out[1] = (R() - 0.5) * 0.028; out[2] = (R() - 0.5) * 0.028; return 0.6; }
+      if (r < 0.27) { const a = R() * Math.PI * 2; const rr = 0.07 * Math.sqrt(R()); out[0] = 0.09; out[1] = Math.cos(a) * rr; out[2] = Math.sin(a) * rr; return 1.3; }
+      const u = R();
+      const w = 0.03 * (1 - Math.pow(u, 4) * 0.8);
+      const e = R() - 0.5;
+      out[0] = 0.12 + u * 1.15;
+      out[1] = (R() - 0.5) * 0.008;
+      out[2] = e * w * 2 - u * u * 0.09;
+      return e < -0.35 ? 2.0 : 1.0;
+    }
+    case 'greatsword': {
+      // A slab of iron: wide blade, heavy crossguard, long grip
+      if (r < 0.1) { out[0] = -0.38 + R() * 0.45; out[1] = (R() - 0.5) * 0.04; out[2] = (R() - 0.5) * 0.04; return 0.6; }
+      if (r < 0.18) { out[0] = 0.08 + R() * 0.07; out[1] = (R() - 0.5) * 0.06; out[2] = (R() - 0.5) * 0.55; return 1.3; }
+      const u = R();
+      const w = 0.16 * (u > 0.85 ? 1 - (u - 0.85) / 0.15 : 1);
+      const e = R() - 0.5;
+      out[0] = 0.15 + u * 1.8;
+      out[1] = (R() - 0.5) * 0.03;
+      out[2] = e * w * 2;
+      return Math.abs(e) > 0.42 ? 1.8 : 0.85;
+    }
+    case 'twinblade': {
+      // Grip in the middle, a blade out of each end
+      if (r < 0.14) { out[0] = -0.15 + R() * 0.3; out[1] = (R() - 0.5) * 0.03; out[2] = (R() - 0.5) * 0.03; return 0.7; }
+      const s = R() < 0.5 ? 1 : -1;
+      const u = R();
+      const w = 0.06 * (1 - Math.pow(u, 3) * 0.9);
+      const e = R() - 0.5;
+      out[0] = s * (0.16 + u * 1.15);
+      out[1] = (R() - 0.5) * 0.01;
+      out[2] = e * w * 2 + s * u * u * 0.12;
+      return Math.abs(e) > 0.4 ? 1.9 : 1.0;
+    }
+    case 'longsword': {
+      if (r < 0.15) { out[0] = -0.35 + R() * 0.42; out[1] = (R() - 0.5) * 0.03; out[2] = (R() - 0.5) * 0.03; return 0.6; }
+      if (r < 0.2) { out[0] = 0.09; out[1] = (R() - 0.5) * 0.03; out[2] = (R() - 0.5) * 0.18; return 1.3; }
+      const u = R();
+      const w = 0.045 * (1 - Math.pow(u, 5) * 0.85);
+      const e = R() - 0.5;
+      out[0] = 0.12 + u * 1.6;
+      out[1] = (R() - 0.5) * 0.01;
+      out[2] = e * w * 2 - u * u * 0.06;
+      return e < -0.35 ? 1.9 : 1.0;
+    }
+    case 'kunai': {
+      // Reverse grip: the leaf blade runs back along the forearm, ring pommel forward
+      if (r < 0.25) { const a = R() * Math.PI * 2; out[0] = 0.12 + Math.cos(a) * 0.05; out[1] = (R() - 0.5) * 0.01; out[2] = Math.sin(a) * 0.05; return 1.4; }
+      if (r < 0.4) { out[0] = -0.02 + R() * 0.1; out[1] = (R() - 0.5) * 0.02; out[2] = (R() - 0.5) * 0.02; return 0.7; }
+      const u = R();
+      const w = 0.055 * Math.sin(Math.PI * Math.min(1, u * 1.1 + 0.08));
+      out[0] = -0.05 - u * 0.4;
+      out[1] = (R() - 0.5) * 0.008;
+      out[2] = (R() - 0.5) * w * 2;
+      return 1.6;
+    }
+    case 'hammer': {
+      if (r < 0.35) { const a = R() * Math.PI * 2; out[0] = -0.3 + R() * 1.5; out[1] = Math.cos(a) * 0.025; out[2] = Math.sin(a) * 0.025; return 0.7; }
+      // Head: a block across the end of the shaft
+      const f = Math.floor(R() * 3);
+      const x = (R() - 0.5) * 2, y = (R() - 0.5) * 2, z = (R() - 0.5) * 2;
+      const q = [x, y, z];
+      q[f] = q[f]! < 0 ? -1 : 1;
+      out[0] = 1.35 + q[0]! * 0.17;
+      out[1] = q[1]! * 0.18;
+      out[2] = q[2]! * 0.32;
+      return Math.abs(q[2]!) > 0.95 ? 2.0 : 1.0;
+    }
+    case 'chargeAxe': {
+      if (r < 0.35) { const a = R() * Math.PI * 2; out[0] = -0.4 + R() * 1.75; out[1] = Math.cos(a) * 0.03; out[2] = Math.sin(a) * 0.03; return 0.7; }
+      if (r < 0.45) { const a = R() * Math.PI * 2; out[0] = 0.25 + R() * 0.35; out[1] = Math.cos(a) * 0.07; out[2] = Math.sin(a) * 0.07; return 1.5; }
+      // Half-moon axe blade on one side of the head
+      const th = (R() - 0.5) * 2.2;
+      const rr = 0.3 + R() * 0.28;
+      out[0] = 1.15 + Math.sin(th) * rr * 0.9;
+      out[1] = (R() - 0.5) * 0.02;
+      out[2] = Math.cos(th) * rr;
+      return rr > 0.53 ? 2.0 : 1.0;
+    }
+    case 'glaive': {
+      if (r < 0.55) { const a = R() * Math.PI * 2; out[0] = -0.8 + R() * 1.6; out[1] = Math.cos(a) * 0.02; out[2] = Math.sin(a) * 0.02; return 0.75; }
+      const s = R() < 0.6 ? 1 : -1;
+      const u = R();
+      const w = 0.07 * Math.sin(Math.PI * Math.min(1, u * 1.2 + 0.05));
+      out[0] = s * (0.8 + u * 0.45);
+      out[1] = (R() - 0.5) * 0.01;
+      out[2] = (R() - 0.5) * w * 2 + (u < 0.25 ? (R() < 0.5 ? 1 : -1) * 0.1 * (1 - u * 4) : 0);
+      return 1.7;
+    }
+    case 'gunlance': {
+      // Thick barrel tapering to a point, muzzle rings
+      const u = R();
+      const a = R() * Math.PI * 2;
+      const rr = 0.075 * (1 - u * 0.75);
+      out[0] = -0.3 + u * 2.1;
+      out[1] = Math.cos(a) * rr;
+      out[2] = Math.sin(a) * rr;
+      const ring = Math.abs(out[0] - 1.25) < 0.04 || Math.abs(out[0] - 0.45) < 0.04;
+      return ring ? 2.2 : u > 0.93 ? 1.8 : 0.8;
+    }
     case 'claws':
     default: {
       const k = Math.floor(R() * 4);

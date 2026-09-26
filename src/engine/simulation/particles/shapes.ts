@@ -299,6 +299,63 @@ function meteor(): Gen[] {
   return [noisySphere([0, 0, 0], 1.1, 0.14, 0.75, 0, 2.8)];
 }
 
+
+/** A spectral warrior half-body (ribcage, skull, horns, pauldrons, arms) holding a colossal sword — stands on the origin */
+function colossus(): Gen[] {
+  const ribs: Gen = {
+    w: 12,
+    g: 0,
+    f: (o) => {
+      // Rib bands wrapping the chest
+      const k = Math.floor(R() * 6);
+      const a = (R() - 0.5) * Math.PI * 1.5;
+      const y = 3.0 + k * 0.28;
+      const rr = 1.0 - Math.abs(k - 2.5) * 0.08;
+      o[0] = Math.cos(a) * rr * 0.8;
+      o[1] = y - Math.abs(Math.sin(a)) * 0.15;
+      o[2] = Math.sin(a) * rr * 1.25;
+      return 1.5;
+    },
+  };
+  const g: Gen[] = [
+    ribs,
+    genEllipsoid([0, 3.7, 0], [0.9, 1.15, 1.3], 0.55),
+    genTube([-0.3, 2.1, 0], [-0.3, 4.9, 0], 0.12, 0.1, 1.4),
+    genEllipsoid([0, 2.2, 0], [0.6, 0.35, 0.95], 0.8),
+    genEllipsoid([0, 1.1, 0], [0.7, 1.1, 0.9], 0.35),
+    genEllipsoid([0.1, 5.35, 0], [0.45, 0.52, 0.42], 0.9),
+    genEllipsoid([0.35, 5.0, 0], [0.18, 0.12, 0.3], 1.2),
+  ];
+  for (const s of [-1, 1]) {
+    g.push({ ...genEllipsoid([0.46, 5.4, s * 0.16], [0.05, 0.04, 0.07], 4), w: 0.25 });
+    g.push(genTube([0, 5.65, s * 0.25], [-0.55, 6.5, s * 0.75], 0.09, 0.02, 1.8));
+    g.push(genEllipsoid([0, 4.55, s * 1.45], [0.6, 0.42, 0.55], 1.1));
+    g.push(genTube([0, 4.4, s * 1.6], [0.6, 3.4, s * 1.95], 0.26, 0.22, 0.8));
+    g.push(genTube([0.6, 3.4, s * 1.95], [1.4, 3.9, s * 1.6], 0.22, 0.18, 0.8));
+    g.push(genEllipsoid([1.5, 3.95, s * 1.55], [0.25, 0.25, 0.25], 1.3));
+  }
+  // The sword, raised in the right hand
+  g.push(genTube([1.5, 3.2, 1.55], [1.55, 4.6, 1.5], 0.07, 0.07, 1.2));
+  g.push(genBox([1.55, 4.6, 1.5], [0.1, 0.06, 0.55], 1.6, 0, 2.4));
+  g.push(genTube([1.6, 4.7, 1.5], [2.6, 10.2, 1.3], 0.22, 0.03, 1.3, 0, 0.25));
+  return g;
+}
+
+/** A giant fist punching down: knuckles at the bottom, forearm rising out of the top */
+function fist(): Gen[] {
+  const g: Gen[] = [
+    genBox([0, 0.2, 0], [0.45, 0.4, 0.55], 0.8, 0, 1.7),
+    genTube([0, 0.6, 0], [0, 2.4, 0], 0.36, 0.3, 0.55),
+    genTube([0.4, 0.15, 0.55], [0.45, -0.3, 0.2], 0.13, 0.11, 0.9),
+  ];
+  for (let k = 0; k < 4; k++) {
+    const z = -0.4 + k * 0.27;
+    g.push(genTube([0.35, -0.22, z], [-0.25, -0.28, z], 0.13, 0.12, 0.9));
+    g.push({ ...genEllipsoid([0.05, -0.42, z], [0.13, 0.1, 0.12], 2.2), w: 0.4 });
+  }
+  return g;
+}
+
 /** Sample `n` points of the shape. Volley shapes come in several pieces (groups). */
 export function sampleShape(kind: SummonKind, n: number): ShapeData {
   switch (kind) {
@@ -314,6 +371,8 @@ export function sampleShape(kind: SummonKind, n: number): ShapeData {
     case 'ufo': return sampleGens(ufo(), n);
     case 'torii': return sampleGens(torii(), n);
     case 'meteor': return sampleGens(meteor(), n);
+    case 'colossus': return sampleGens(colossus(), n);
+    case 'fist': return sampleGens(fist(), n);
     case 'coconuts': {
       const cs: V3[] = Array.from({ length: 10 }, (_, i) => [Math.cos(i * 2.4) * (0.35 + 0.1 * i), Math.sin(i * 1.3) * 0.45, Math.sin(i * 2.4) * (0.35 + 0.1 * i)]);
       return sampleGens(coconuts(cs), n, cs);
