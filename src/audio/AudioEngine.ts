@@ -12,6 +12,7 @@ export class AudioEngine implements IAudioEngine {
   private sourceNode: MediaElementAudioSourceNode | null = null;
   private analyserNode: AnalyserNode | null = null;
   private gainNode: GainNode | null = null;
+  private captureNode: MediaStreamAudioDestinationNode | null = null;
 
   private frequencyData: Uint8Array = new Uint8Array(0);
   private timeDomainData: Uint8Array = new Uint8Array(0);
@@ -292,6 +293,25 @@ export class AudioEngine implements IAudioEngine {
       this.analyserNode.getByteTimeDomainData(this.timeDomainData as unknown as Uint8Array<ArrayBuffer>);
     }
     return this.timeDomainData;
+  }
+
+  /**
+   * The song as a MediaStream for video export. Tapped before the volume gain so the
+   * recording's level does not follow the monitor volume.
+   */
+  public captureStream(): MediaStream {
+    const { ctx, analyser } = this.ensureContext();
+    if (!this.captureNode) {
+      this.captureNode = ctx.createMediaStreamDestination();
+      analyser.connect(this.captureNode);
+    }
+    return this.captureNode.stream;
+  }
+
+  public releaseCapture(): void {
+    if (!this.captureNode) return;
+    this.analyserNode?.disconnect(this.captureNode);
+    this.captureNode = null;
   }
 
   public getCurrentTime(): number {

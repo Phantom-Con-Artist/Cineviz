@@ -1,11 +1,15 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { ViewportHeader } from '../components/ui/ViewportHeader';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { TopBar } from '../components/ui/TopBar';
 import { CinematicViewport } from '../components/ui/CinematicViewport';
-import { CameraControlsBar } from '../components/ui/CameraControlsBar';
-import { MusicControlDeck } from '../components/ui/MusicControlDeck';
-import { CreativeParametersDeck } from '../components/ui/CreativeParametersDeck';
+import { TransportTimeline } from '../components/ui/TransportTimeline';
+import { CreativeStrip } from '../components/ui/CreativeStrip';
+import { DirectorPanel } from '../components/ui/DirectorPanel';
+import { DebugPanel } from '../components/ui/DebugPanel';
+import { ExportDialog } from '../components/ui/ExportDialog';
+import { formatClock } from '../components/ui/CinematicOverlay';
 import { AudioEngine } from '../audio/AudioEngine';
 import { EngineBridge } from '../engine/EngineBridge';
+import { downloadBlob, VideoExporter, VideoExportOptions } from '../engine/export/VideoExporter';
 import { CreativeParameters, DEFAULT_CREATIVE_PARAMETERS } from '../types/creative';
 import { ViewportSettings } from '../types/engine';
 import { MusicTrackMetadata } from '../types/music';
@@ -17,14 +21,19 @@ const SAMPLE_TRACKS = [
   { title: 'Still Alive', url: stillAliveUrl },
 ];
 
-export const WorkstationLayout: React.FC = () => {
-  // Creative parameters (React UI state)
-  const [creativeParams, setCreativeParams] = useState<CreativeParameters>({
-    ...DEFAULT_CREATIVE_PARAMETERS,
-  });
-  const [seed, setSeed] = useState<number>(42819);
+interface ExportStatus {
+  phase: 'recording' | 'encoding' | 'error';
+  message?: string;
+}
 
-  // Viewport display settings (React UI state)
+/**
+ * The workstation: a thin top bar, the cinematic viewport taking every pixel it can,
+ * the music timeline and the creative controls underneath. Panels float over the
+ * viewport and can be collapsed; developer overlays only appear in debug mode.
+ */
+export const WorkstationLayout: React.FC = () => {
+  const [creativeParams, setCreativeParams] = useState<CreativeParameters>({ ...DEFAULT_CREATIVE_PARAMETERS });
+  const [seed, setSeed] = useState<number>(42819);
   const [viewportSettings, setViewportSettings] = useState<ViewportSettings>({
     showSafeAreas: false,
     showRuleOfThirds: false,
@@ -32,30 +41,96 @@ export const WorkstationLayout: React.FC = () => {
     bloomEnabled: true,
   });
 
-  // Audio & Music playback UI state
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
   const [trackMeta, setTrackMeta] = useState<MusicTrackMetadata | null>(null);
-  const [fps, setFps] = useState(60);
   const [analyzing, setAnalyzing] = useState(false);
-  const [profile, setProfile] = useState<{ levels: number[]; drops: number[] } | null>(null);
+  const [analysisVersion, setAnalysisVersion] = useState(0);
+  const [matchup, setMatchup] = useState<[string, string]>(['—', '—']);
+  const [palette, setPalette] = useState('');
+  const [bpm, setBpm] = useState<number | null>(null);
 
-  // Stable engine references (NOT stored in React state to avoid re-render cycles)
+  const [directorOpen, setDirectorOpen] = useState(true);
+  const [debug, setDebug] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exporter, setExporter] = useState<VideoExporter | null>(null);
+  const [exportStatus, setExportStatus] = useState<ExportStatus | null>(null);
+
   const audioEngineRef = useRef<AudioEngine | null>(null);
   const engineBridgeRef = useRef<EngineBridge | null>(null);
-  // The viewport needs the bridge once it exists (a ref alone would not re-render it)
   const [bridge, setBridge] = useState<EngineBridge | null>(null);
+  const exporterRef = useRef<VideoExporter | null>(null);
+  exporterRef.current = exporter;
 
-  // Initialize engine bridge & audio on mount
+  // ------------------------------------------------------------------ export
+  const endExport = useCallback(() => {
+    audioEngineRef.current?.releaseCapture();
+    setExporter(null);
+  }, []);
+
+  const finishExport = useCallback(async () => {
+    const ex = exporterRef.current;
+    if (!ex) return;
+    setExportStatus({ phase: 'encoding' });
+    try {
+      const blob = await ex.finish();
+      const o = ex.options;
+      const name = `cineviz-${engineBridgeRef.current?.getMatchup().join('-vs-') ?? 'fight'}-${o.width}x${o.height}-${o.frameRate}fps.${o.format.ext}`;
+      downloadBlob(blob, name);
+      setExportStatus(null);
+    } catch (e) {
+      if ((e as Error).message !== 'cancelled') setExportStatus({ phase: 'error', message: (e as Error).message });
+      else setExportStatus(null);
+    }
+    endExport();
+  }, [endExport]);
+  const finishRef = useRef(finishExport);
+  finishRef.current = finishExport;
+
+  const startExport = async (o: VideoExportOptions) => {
+    const audio = audioEngineRef.current;
+    if (!audio) return;
+    setExportOpen(false);
+    // From the top of the song: stopping resets the arena, the next play is a fresh fight
+    audio.stop();
+    let ex: VideoExporter;
+    try {
+      ex = new VideoExporter(o);
+    } catch (e) {
+      setExportStatus({ phase: 'error', message: (e as Error).message });
+      return;
+    }
+    setExporter(ex);
+    setExportStatus({ phase: 'recording' });
+    // Let the viewport switch to the export resolution before the first frame is recorded
+    await new Promise((r) => setTimeout(r, 400));
+    try {
+      ex.start(o.includeAudio ? audio.captureStream() : null);
+      await audio.play();
+    } catch (e) {
+      ex.cancel();
+      setExportStatus({ phase: 'error', message: (e as Error).message });
+      endExport();
+    }
+  };
+
+  const cancelExport = () => {
+    exporterRef.current?.cancel();
+    audioEngineRef.current?.pause();
+    setExportStatus(null);
+    endExport();
+  };
+
+  // ------------------------------------------------------------------ engine
   useEffect(() => {
     const audio = new AudioEngine({
       onPlay: () => setIsPlaying(true),
       onPause: () => setIsPlaying(false),
       onEnded: () => {
         setIsPlaying(false);
-        setCurrentTime(0);
+        if (exporterRef.current) void finishRef.current();
       },
       onTimeUpdate: (time, dur) => {
         setCurrentTime(time);
@@ -65,190 +140,188 @@ export const WorkstationLayout: React.FC = () => {
         setTrackMeta(meta);
         setDuration(meta.duration);
       },
-      onError: (err) => {
-        console.error('Audio engine event error:', err);
-      },
+      onError: (err) => console.error('Audio engine event error:', err),
       onAnalyzing: (busy) => {
         setAnalyzing(busy);
         if (engineBridgeRef.current) engineBridgeRef.current.analyzing = busy;
-        if (!busy) {
-          const a = audio.getAnalysis();
-          setProfile(a ? { levels: a.profile, drops: a.drops.map((d) => d / Math.max(1, a.beats.length)) } : null);
-        }
+        if (!busy) setAnalysisVersion((v) => v + 1);
       },
     });
 
-    const bridge = new EngineBridge(audio);
-    bridge.setSeed(seed);
-    bridge.setCreativeParams(creativeParams);
-
+    const b = new EngineBridge(audio);
+    b.setSeed(seed);
+    b.setCreativeParams(creativeParams);
     audioEngineRef.current = audio;
-    engineBridgeRef.current = bridge;
-    setBridge(bridge);
-    // Dev only: inspect the engine from the browser console
-    if (import.meta.env.DEV) (window as unknown as { __viz: EngineBridge }).__viz = bridge;
+    engineBridgeRef.current = b;
+    setBridge(b);
+    if (import.meta.env.DEV) (window as unknown as { __viz: EngineBridge }).__viz = b;
 
-    // Coarse telemetry polling for UI status (10Hz, strictly separated from WebGL render loop)
-    const telemetryInterval = setInterval(() => {
-      if (engineBridgeRef.current) {
-        const tel = engineBridgeRef.current.getTelemetry();
-        setFps(tel.fps);
-      }
-    }, 200);
-
+    // Slow UI telemetry (the render loop never touches React state)
+    const id = setInterval(() => {
+      const m = b.getMatchup();
+      setMatchup((old) => (old[0] === m[0] && old[1] === m[1] ? old : m));
+      setPalette(b.palette.name);
+      setBpm(b.getAnalysis()?.bpm ?? null);
+    }, 500);
     return () => {
-      clearInterval(telemetryInterval);
-      bridge.dispose();
+      clearInterval(id);
+      b.dispose();
       audio.dispose();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Update engine bridge when creative parameters change
-  const handleCreativeParamsChange = (newParams: CreativeParameters) => {
-    setCreativeParams(newParams);
-    engineBridgeRef.current?.setCreativeParams(newParams);
-  };
+  useEffect(() => {
+    if (bridge) bridge.debug = debug;
+  }, [bridge, debug]);
 
+  // Keyboard: space = play / pause, D = debug
+  const playRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.code === 'Space') {
+        e.preventDefault();
+        playRef.current();
+      } else if (e.key === 'd' || e.key === 'D') setDebug((d) => !d);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const locked = !!exporter;
+
+  const handleCreativeParamsChange = (p: CreativeParameters) => {
+    setCreativeParams(p);
+    engineBridgeRef.current?.setCreativeParams(p);
+  };
+  const handleResetDefaults = () => handleCreativeParamsChange({ ...DEFAULT_CREATIVE_PARAMETERS });
   const handleRandomizeSeed = () => {
-    const newSeed = Math.floor(Math.random() * 900000) + 100000;
-    setSeed(newSeed);
-    engineBridgeRef.current?.setSeed(newSeed);
+    const s = Math.floor(Math.random() * 900000) + 100000;
+    setSeed(s);
+    engineBridgeRef.current?.setSeed(s);
   };
 
-  const handleResetDefaults = () => {
-    setCreativeParams({ ...DEFAULT_CREATIVE_PARAMETERS });
-    engineBridgeRef.current?.setCreativeParams({ ...DEFAULT_CREATIVE_PARAMETERS });
-  };
-
-  // Audio actions
   const handlePlay = async () => {
-    if (!audioEngineRef.current) return;
+    const a = audioEngineRef.current;
+    if (!a) return;
     try {
-      // If no file loaded yet, load synthetic demo beat automatically
-      if (!trackMeta) {
-        await audioEngineRef.current.loadSyntheticDemoTrack();
-      }
-      await audioEngineRef.current.play();
+      if (!trackMeta) await a.loadSyntheticDemoTrack();
+      await a.play();
     } catch (e) {
       console.error('Failed to start audio playback:', e);
     }
   };
-
-  const handlePause = () => {
-    audioEngineRef.current?.pause();
+  const handlePause = () => audioEngineRef.current?.pause();
+  playRef.current = () => {
+    if (locked) return;
+    if (isPlaying) handlePause();
+    else void handlePlay();
   };
-
   const handleStop = () => {
     audioEngineRef.current?.stop();
     setCurrentTime(0);
     setIsPlaying(false);
   };
-
-  const handleSeek = (time: number) => {
-    audioEngineRef.current?.seek(time);
-    setCurrentTime(time);
+  const handleSeek = (t: number) => {
+    audioEngineRef.current?.seek(t);
+    setCurrentTime(t);
   };
-
-  const handleVolumeChange = (vol: number) => {
-    setVolume(vol);
-    audioEngineRef.current?.setVolume(vol);
+  const handleVolume = (v: number) => {
+    setVolume(v);
+    audioEngineRef.current?.setVolume(v);
   };
-
-  const handleLoadSyntheticDemo = async () => {
-    if (!audioEngineRef.current) return;
+  const load = async (fn: (a: AudioEngine) => Promise<MusicTrackMetadata>) => {
+    const a = audioEngineRef.current;
+    if (!a) return;
     try {
-      const meta = await audioEngineRef.current.loadSyntheticDemoTrack();
+      const meta = await fn(a);
       setTrackMeta(meta);
       setDuration(meta.duration);
-      await audioEngineRef.current.play();
+      await a.play();
     } catch (e) {
-      console.error('Failed to generate synthetic demo:', e);
-    }
-  };
-
-  const handleLoadSample = async (url: string, title: string) => {
-    if (!audioEngineRef.current) return;
-    try {
-      const meta = await audioEngineRef.current.load(url, title);
-      setTrackMeta(meta);
-      setDuration(meta.duration);
-      await audioEngineRef.current.play();
-    } catch (e) {
-      console.error('Failed to load sample track:', e);
-    }
-  };
-
-  const handleFileUpload = async (file: File) => {
-    if (!audioEngineRef.current) return;
-    try {
-      const meta = await audioEngineRef.current.load(file);
-      setTrackMeta(meta);
-      setDuration(meta.duration);
-      await audioEngineRef.current.play();
-    } catch (e) {
-      console.error('Failed to load user audio file:', e);
+      console.error('Failed to load track:', e);
     }
   };
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-workstation-950 text-slate-200 overflow-y-auto">
-      {/* Viewport Top Header */}
-      <ViewportHeader
+    <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#050608] text-slate-200 select-none">
+      <TopBar
+        matchup={matchup}
+        palette={palette}
+        track={trackMeta?.title ?? null}
+        bpm={bpm}
         seed={seed}
-        onRandomizeSeed={handleRandomizeSeed}
-        fps={fps}
+        onReroll={handleRandomizeSeed}
+        directorOpen={directorOpen}
+        onDirector={() => setDirectorOpen((o) => !o)}
+        debug={debug}
+        onDebug={() => setDebug((d) => !d)}
+        exporting={locked}
+        onExport={() => (locked ? undefined : setExportOpen(true))}
+        locked={locked}
       />
 
-      {/* Main Workstation Body */}
-      <main className="flex-1 flex flex-col p-3 gap-3 max-w-[1600px] w-full mx-auto">
-        {/* UPPER SECTION: 16:9 Cinematic Viewport & Camera Controls */}
-        <section className="flex flex-col bg-workstation-900 border border-workstation-800 rounded-lg overflow-hidden shadow-2xl">
-          <CinematicViewport
-            settings={viewportSettings}
-            bridge={bridge}
-          />
-          <CameraControlsBar
-            settings={viewportSettings}
-            onUpdateSettings={setViewportSettings}
-          />
-        </section>
+      <main className="relative flex-1 min-h-0">
+        <CinematicViewport settings={viewportSettings} bridge={bridge} debug={debug} exporter={exporter}>
+          {bridge && <DirectorPanel bridge={bridge} open={directorOpen} onToggle={() => setDirectorOpen((o) => !o)} />}
+          {bridge && debug && <DebugPanel bridge={bridge} settings={viewportSettings} onSettings={setViewportSettings} />}
+        </CinematicViewport>
 
-        {/* LOWER SECTION: Music Control Deck & Creative Parameters */}
-        <section className="grid grid-cols-1 lg:grid-cols-12 gap-3">
-          {/* Music Controls Deck (5 cols on large screens) */}
-          <div className="lg:col-span-5 flex flex-col">
-            <MusicControlDeck
-              isPlaying={isPlaying}
-              currentTime={currentTime}
-              duration={duration}
-              volume={volume}
-              metadata={trackMeta}
-              onPlay={handlePlay}
-              onPause={handlePause}
-              onStop={handleStop}
-              onSeek={handleSeek}
-              onVolumeChange={handleVolumeChange}
-              onLoadSyntheticDemo={handleLoadSyntheticDemo}
-              onFileUpload={handleFileUpload}
-              sampleTracks={SAMPLE_TRACKS}
-              analyzing={analyzing}
-              profile={profile}
-              onLoadSample={handleLoadSample}
-              onPreviousTrack={() => handleSeek(0)}
-              onNextTrack={() => handleSeek(duration)}
-            />
+        {exportStatus && (
+          <div className="absolute top-0 inset-x-0 z-30 flex items-center gap-4 px-4 h-8 bg-black/80 border-b border-red-500/20 font-mono text-[10px] tracking-[0.2em] text-slate-300">
+            {exportStatus.phase === 'recording' && exporter && (
+              <>
+                <span className="text-red-400">● REC</span>
+                <span>
+                  {exporter.options.width}×{exporter.options.height} · {exporter.options.frameRate} FPS · {exporter.options.format.label}
+                </span>
+                <div className="flex-1 h-px bg-white/10">
+                  <div className="h-px bg-red-400" style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }} />
+                </div>
+                <span className="tabular-nums">{formatClock(currentTime, false)} / {formatClock(duration, false)}</span>
+                <button onClick={cancelExport} className="text-slate-400 hover:text-white">CANCEL</button>
+              </>
+            )}
+            {exportStatus.phase === 'encoding' && <span>FINALISING VIDEO…</span>}
+            {exportStatus.phase === 'error' && (
+              <>
+                <span className="text-red-400">EXPORT FAILED</span>
+                <span className="truncate">{exportStatus.message}</span>
+                <div className="flex-1" />
+                <button onClick={() => setExportStatus(null)} className="text-slate-400 hover:text-white">DISMISS</button>
+              </>
+            )}
           </div>
-
-          {/* Creative Parameters Sliders (7 cols on large screens) */}
-          <div className="lg:col-span-7 flex flex-col">
-            <CreativeParametersDeck
-              parameters={creativeParams}
-              onChange={handleCreativeParamsChange}
-              onReset={handleResetDefaults}
-            />
-          </div>
-        </section>
+        )}
       </main>
+
+      <TransportTimeline
+        bridge={bridge}
+        isPlaying={isPlaying}
+        currentTime={currentTime}
+        duration={duration}
+        volume={volume}
+        metadata={trackMeta}
+        analyzing={analyzing}
+        analysisVersion={analysisVersion}
+        locked={locked}
+        sampleTracks={SAMPLE_TRACKS}
+        onPlay={handlePlay}
+        onPause={handlePause}
+        onStop={handleStop}
+        onSeek={handleSeek}
+        onVolume={handleVolume}
+        onFile={(f) => void load((a) => a.load(f))}
+        onSample={(url, title) => void load((a) => a.load(url, title))}
+        onDemo={() => void load((a) => a.loadSyntheticDemoTrack())}
+      />
+      <CreativeStrip parameters={creativeParams} onChange={handleCreativeParamsChange} onReset={handleResetDefaults} />
+
+      {exportOpen && (
+        <ExportDialog duration={duration} hasTrack={!!trackMeta} onClose={() => setExportOpen(false)} onStart={(o) => void startExport(o)} />
+      )}
     </div>
   );
 };

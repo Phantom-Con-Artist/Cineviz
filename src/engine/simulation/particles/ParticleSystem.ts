@@ -11,6 +11,18 @@ import { TechRenderer } from './TechRenderer';
 import { MorphCloud } from './MorphCloud';
 import { PetCloud } from './PetCloud';
 import { WeaponCloud } from './WeaponCloud';
+import { currentReference, loadReference } from '../figure/ReferenceMesh';
+import { buildSkin, eyeLocals } from '../figure/ParticleSkin';
+import humanReferenceUrl from '../../../../assets/models/makehuman-base.glb?url';
+
+/** Identity of a proportions object, for skin cache keys */
+const buildIds = new WeakMap<object, number>();
+let nextBuildId = 1;
+const buildId = (o: object) => {
+  let id = buildIds.get(o);
+  if (!id) buildIds.set(o, (id = nextBuildId++));
+  return id;
+};
 
 /**
  * Every glowing point in the show lives in one set of buffers, laid out as
@@ -85,6 +97,17 @@ export class ParticleSystem {
     const blank: TeamColors = { core: WHITE, edge: WHITE, aura: WHITE, hot: WHITE };
     this.cols = [blank, blank];
     this.tech = new TechRenderer(this);
+    void loadReference(humanReferenceUrl);
+  }
+
+  /** (Re)sample a body's skin from the reference mesh when it arrives or the actor's build changes */
+  private syncSkin(body: BodyCloud, a: Actor): void {
+    const ref = currentReference();
+    if (!ref.mesh) return;
+    const key = `${ref.version}|${buildId(a.proportions)}`;
+    if (body.skinKey === key) return;
+    const skin = buildSkin(ref.mesh, a.dims, a.proportions, body.n, R);
+    body.applySkin(skin, eyeLocals(ref.mesh, a.dims, a.proportions), key);
   }
 
   setPalette(p: MatchPalette): void {
@@ -586,6 +609,7 @@ export class ParticleSystem {
     eng.fighters.forEach((f, k) => {
       const body = this.bodies[k]!;
       const c = this.cols[k]!;
+      this.syncSkin(body, f);
       body.visTarget = f.present ? 1 : 0;
       if (!f.present && body.vis < 0.01 && !body.dissolving) {
         body.hide(o);
@@ -619,6 +643,7 @@ export class ParticleSystem {
         return;
       }
       const c = this.cols[cl.owner]!;
+      this.syncSkin(body, cl);
       body.update(dt, t, cl.frames, { flash: cl.hitFlash, superMode: 0, aura: 0.4, erosion: 0, alpha: 0.8, colors: c }, o);
       this.emitAura(cl, body, c, 0.35, dt);
       this.afterimages(cl, body, c, 2 + i, dt);

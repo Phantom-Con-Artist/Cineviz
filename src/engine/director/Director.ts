@@ -2,27 +2,80 @@ import * as THREE from 'three';
 import { CombatEvent, PhraseKind } from '../../types/cinematic';
 import { CameraMode } from '../../types/engine';
 import { MusicState } from '../../types/music';
-import { clamp, damp, lerp, wrapAngle } from '../../utils/math';
-import { CombatEngine, NormalizedParams } from '../simulation/combat/CombatEngine';
+import { clamp, damp, lerp, smoothstep, wrapAngle } from '../../utils/math';
+import { CombatEngine, Fighter, NormalizedParams } from '../simulation/combat/CombatEngine';
 import { J } from '../simulation/combat/Skeleton';
+import { WEAPON_LENGTH } from '../simulation/combat/Archetypes';
 
 export type ShotKind =
   | 'establish' | 'walk' | 'wide' | 'medium' | 'ots' | 'close' | 'hero' | 'god'
-  | 'orbit' | 'tracking' | 'aerial' | 'beam' | 'requiem' | 'summon' | 'pet';
+  | 'orbit' | 'tracking' | 'aerial' | 'beam' | 'requiem' | 'summon' | 'pet' | 'impact' | 'follow';
+
+/** The cinematographic grammar every concrete shot belongs to */
+export type ShotType = 'WIDE' | 'TWO_SHOT' | 'FOLLOW' | 'CLOSE_UP' | 'IMPACT' | 'ORBIT' | 'LOW_ANGLE' | 'HIGH_ANGLE';
 
 const SHOT_LABEL: Record<ShotKind, string> = {
   establish: 'ESTABLISHING', walk: 'TRACKING WALK', wide: 'WIDE MASTER', medium: 'MEDIUM DUEL', ots: 'OVER SHOULDER',
   close: 'CLOSE UP', hero: 'LOW HERO', god: 'GOD VIEW', orbit: 'BULLET TIME', tracking: 'TRACKING', aerial: 'AERIAL',
-  beam: 'BEAM WIDE', requiem: 'REQUIEM', summon: 'SUMMON', pet: 'FAMILIAR',
+  beam: 'BEAM WIDE', requiem: 'REQUIEM', summon: 'SUMMON', pet: 'FAMILIAR', impact: 'IMPACT', follow: 'FOLLOW',
 };
+
+const SHOT_TYPE: Record<ShotKind, ShotType> = {
+  establish: 'WIDE', walk: 'FOLLOW', wide: 'WIDE', medium: 'TWO_SHOT', ots: 'TWO_SHOT', close: 'CLOSE_UP', hero: 'LOW_ANGLE',
+  god: 'HIGH_ANGLE', orbit: 'ORBIT', tracking: 'FOLLOW', aerial: 'LOW_ANGLE', beam: 'WIDE', requiem: 'HIGH_ANGLE',
+  summon: 'WIDE', pet: 'WIDE', impact: 'IMPACT', follow: 'FOLLOW',
+};
+
+/** Default blend into a shot (seconds): impacts snap in, wides drift */
+const TRANSITION: Partial<Record<ShotKind, number>> = {
+  impact: 0.18, close: 0.55, follow: 0.7, orbit: 0.5, hero: 0.9, wide: 1.1, establish: 1.4, god: 1.2, requiem: 1,
+};
+
+/** Handheld drift per shot type (metres of camera sway) */
+/** Shots that frame the pair, so swapping the "subject" does not change the picture */
+const GROUP_SHOT = new Set<ShotKind>(['establish', 'walk', 'wide', 'medium', 'god', 'tracking', 'aerial', 'beam', 'summon']);
+/** Shots whose distance is solved from the bodies' bounding box (and may be pushed back to keep them in frame) */
+const FIT_SHOT = new Set<ShotKind>(['walk', 'wide', 'medium', 'tracking', 'aerial', 'follow', 'impact', 'close']);
+/** Set pieces big enough to change the shot as soon as they start */
+const BIG_PHRASE = new Set<PhraseKind>(['beam_clash', 'power_up', 'ultra', 'finisher', 'summon', 'clone_jutsu', 'super', 'intro']);
+
+const HANDHELD: Record<ShotType, number> = {
+  WIDE: 0.02, TWO_SHOT: 0.035, FOLLOW: 0.06, CLOSE_UP: 0.025, IMPACT: 0.03, ORBIT: 0.012, LOW_ANGLE: 0.03, HIGH_ANGLE: 0.015,
+};
+
+/** What a shot is, for the UI (Shot / DirectorState in the design notes) */
+export interface ShotInfo {
+  type: ShotType;
+  kind: ShotKind;
+  label: string;
+  /** 'A' / 'B' fighters (first is the subject) */
+  subjectIds: string[];
+  /** Planned length (seconds) */
+  duration: number;
+  transitionDuration: number;
+  camera: { distance: number; fov: number; angle: number; height: number; shake: number };
+  timeScale?: number;
+}
+
+export interface DirectorState {
+  currentShot: ShotInfo;
+  previousShot: ShotInfo | null;
+  nextShot: ShotInfo | null;
+  shotTime: number;
+  timeScale: number;
+  shotNumber: number;
+  /** Last significant event the director reacted to */
+  event: string;
+  eventAge: number;
+}
 
 /** Shots that suit each set piece; the director cycles through them on the beat */
 const POOLS: Record<PhraseKind, ShotKind[]> = {
   intro: ['walk', 'hero', 'walk', 'close', 'wide'],
   tension: ['medium', 'hero', 'close', 'wide', 'ots'],
   standoff: ['hero', 'close', 'wide', 'hero', 'medium'],
-  exchange: ['medium', 'ots', 'tracking', 'ots', 'close', 'medium'],
-  dash_clash: ['wide', 'tracking', 'medium'],
+  exchange: ['medium', 'ots', 'follow', 'tracking', 'ots', 'close', 'medium'],
+  dash_clash: ['wide', 'follow', 'tracking', 'medium'],
   weapon_duel: ['medium', 'close', 'ots', 'tracking'],
   clone_jutsu: ['god', 'wide', 'ots'],
   ki_barrage: ['ots', 'medium', 'tracking', 'wide'],
@@ -71,6 +124,20 @@ interface Shot {
   age: number;
   startYaw: number;
   focus: THREE.Vector3;
+  /** Blend-in time (seconds) */
+  transition: number;
+  /** Planned hold (seconds) — the beat-driven cutter may change it */
+  duration: number;
+}
+
+/** A shot booked for later: part of a planned sequence (impact → close-up → wide) */
+interface Booked {
+  kind: ShotKind;
+  subject: number;
+  /** Director clock time to switch */
+  at: number;
+  transition: number;
+  focus?: readonly number[];
 }
 
 /**
@@ -111,8 +178,19 @@ export class Director {
   captionAge = 99;
   captionUltra = false;
   shotNumber = 1;
+  /** Viewport aspect ratio (set by the renderer; export may change it) */
+  aspect = 16 / 9;
+  /** Bumped whenever the director reacts to a significant event (see getState().event) */
+  eventSerial = 0;
 
-  private shot: Shot = { kind: 'establish', subject: 0, age: 0, startYaw: 0, focus: new THREE.Vector3() };
+  private shot: Shot = { kind: 'establish', subject: 0, age: 0, startYaw: 0, focus: new THREE.Vector3(), transition: 1.4, duration: 6 };
+  private prevInfo: ShotInfo | null = null;
+  private queue: Booked[] = [];
+  private eventLabel = '';
+  private eventAt = -99;
+  private lastSection = '';
+  private readonly box = new Float32Array(3 * 64);
+  private boxN = 0;
   private side = 1;
   private fx = new Spring();
   private fy = new Spring();
@@ -137,7 +215,7 @@ export class Director {
   private letterboxTarget = 0.6;
   private desat = 0;
   private poolIdx = 0;
-  private prm: NormalizedParams = { fight: 0.75, epic: 0.8, slowMotion: 0.6, sadness: 0.25, chaos: 0.4, aura: 0.85 };
+  private prm: NormalizedParams = { fight: 0.75, epic: 0.8, slowMotion: 0.6, sadness: 0.25, chaos: 0.4, aura: 0.85, drama: 0.6 };
   private initialised = false;
 
   constructor() {
@@ -149,6 +227,9 @@ export class Director {
   }
 
   reset(): void {
+    this.queue.length = 0;
+    this.prevInfo = null;
+    this.eventLabel = '';
     this.slow.length = 0;
     this.timeScale = 1;
     this.lag = 0;
@@ -161,11 +242,24 @@ export class Director {
     this.prm = prm;
     const epic = prm.epic;
     switch (e.type) {
+      case 'windup': {
+        // A heavy blow is coming: get the camera onto the attacker so the impact can be caught
+        const heavy = e.critical || e.intensity >= 0.85;
+        if (!heavy || this.slow.length || this.queue.length || this.clock - this.lastOverride < 1.2 || this.shot.age < 1.5) break;
+        if (Math.random() > 0.3 + prm.drama * 0.5) break;
+        const lead = (e.beats ?? 1) * eng.spb;
+        this.lastOverride = this.clock;
+        this.setShot(Math.random() < 0.6 ? 'follow' : 'medium', e.fighter, false, eng, undefined, clamp(lead * 0.8, 0.25, 0.9));
+        this.mark('Heavy wind-up');
+        break;
+      }
       case 'phrase': {
         this.phrase = e.phrase ?? 'exchange';
         this.letterboxTarget = LETTERBOX[this.phrase] * (0.4 + epic * 0.6);
         this.poolIdx = -1;
-        // New set piece: change shot (a cut only when it lands on a downbeat-ish moment)
+        // A new set piece changes the shot only once the current one has had its moment
+        // (big set pieces always do); a cut only now and then
+        if (this.queue.length || (!BIG_PHRASE.has(this.phrase) && this.shot.age < this.minHold())) break;
         const cut = this.phrase !== 'intro' && Math.random() < 0.25 + epic * 0.25;
         this.setShot(this.nextFromPool(), e.fighter, cut, eng);
         break;
@@ -179,7 +273,9 @@ export class Director {
           this.bloom = 1;
           this.fovKick = -7;
           if (epic > 0.35) this.impactFrame = 0.07;
-          this.override(eng, 'orbit', e.target, false, e.pos);
+          if (Math.random() < 0.5 + prm.drama * 0.4) this.impactSequence(eng, e.target, e.pos);
+          else this.override(eng, 'orbit', e.target, false, e.pos);
+          this.mark('Heavy impact');
         } else {
           this.shake(0.12 * (0.5 + epic * 0.6) * (0.4 + eng.heat));
           this.chroma = Math.max(this.chroma, 0.25);
@@ -217,6 +313,7 @@ export class Director {
         this.chroma = 1;
         this.bloom = 1.2;
         this.override(eng, 'orbit', e.fighter, true, e.pos);
+        this.mark('Clash');
         break;
       case 'weapon_shatter':
         this.shake(0.4);
@@ -241,6 +338,7 @@ export class Director {
         this.flash = 0.6;
         this.shake(0.5);
         this.override(eng, 'beam', e.fighter, true);
+        this.mark('Beam struggle');
         break;
       case 'beam_pulse':
         this.shake(0.25);
@@ -256,6 +354,7 @@ export class Director {
         this.override(eng, 'wide', e.fighter, false);
         break;
       case 'launch':
+        this.mark('Launch');
         this.override(eng, 'aerial', e.fighter, false);
         this.shake(0.3);
         break;
@@ -271,14 +370,20 @@ export class Director {
         this.bloom = 1.5;
         this.override(eng, 'hero', e.fighter, true);
         this.letterboxTarget = 1;
+        this.mark('Power-up');
         break;
       case 'death':
         this.bulletTime(0.25, 2.2);
         this.flash = 0.8;
         this.impactFrame = 0.09;
         this.desat = 0.7;
+        this.queue.length = 0;
+        this.lastOverride = -9;
         this.override(eng, 'requiem', e.target, false, e.pos);
+        // Aftermath: pull up and away over the battlefield
+        this.book('god', e.target, 3.2, 2);
         this.letterboxTarget = 1;
+        this.mark('Death');
         break;
       case 'reform':
         this.override(eng, 'hero', e.fighter, false);
@@ -313,6 +418,7 @@ export class Director {
         this.bloom = 0.8;
         break;
       case 'tech_charge':
+        this.mark(e.label ? `Technique: ${e.label}` : 'Technique');
         this.caption = e.label ?? '';
         this.captionAge = 0;
         this.captionUltra = false;
@@ -325,6 +431,7 @@ export class Director {
         this.captionAge = 0;
         this.captionUltra = true;
         this.override(eng, this.rngPick(['summon', 'summon', 'wide']), e.fighter, true);
+        this.mark(e.label ? `Ultra: ${e.label}` : 'Ultra');
         this.letterboxTarget = 1;
         this.bloom = 1.2;
         this.shake(0.3);
@@ -346,7 +453,9 @@ export class Director {
           this.impactFrame = epic > 0.3 ? 0.08 : 0;
           this.bloom = 1.4;
           this.chroma = 1;
-          this.override(eng, 'orbit', e.target, false, e.pos);
+          if (Math.random() < 0.4 + prm.drama * 0.3) this.impactSequence(eng, e.target, e.pos);
+          else this.override(eng, 'orbit', e.target, false, e.pos);
+          this.mark('Technique impact');
         } else {
           this.shake(0.2 + e.intensity * 0.3);
           this.chroma = Math.max(this.chroma, 0.4);
@@ -392,15 +501,44 @@ export class Director {
 
   /** Event-driven shot change, rate limited so big moments never stack cuts */
   private override(eng: CombatEngine, kind: ShotKind, subject: number, cut: boolean, focus?: readonly number[]): void {
-    if (this.clock - this.lastOverride < 1.4) return;
+    if (this.clock - this.lastOverride < 2.2 || this.shot.age < 0.9) return;
     this.lastOverride = this.clock;
+    this.queue.length = 0;
     this.setShot(kind, subject, cut, eng, focus);
   }
 
-  private setShot(kind: ShotKind, subject: number, cut: boolean, eng?: CombatEngine, focus?: readonly number[]): void {
+  /** Book a shot `delay` seconds after the previous booking (planned sequences) */
+  private book(kind: ShotKind, subject: number, delay: number, transition: number, focus?: readonly number[]): void {
+    const at = (this.queue.length ? this.queue[this.queue.length - 1]!.at : this.clock) + delay;
+    this.queue.push({ kind, subject, at, transition, focus });
+  }
+
+  /**
+   * The camera catches a big blow: a fast push onto the point of impact (in bullet time),
+   * a close-up of the victim recoiling, then a pull back to let it breathe.
+   */
+  private impactSequence(eng: CombatEngine, victim: number, pos: readonly number[]): void {
+    if (this.clock - this.lastOverride < 0.5) return;
+    this.lastOverride = this.clock;
+    this.queue.length = 0;
+    this.setShot('impact', victim, false, eng, pos, 0.16);
+    const slowHold = 0.45 + this.prm.slowMotion * 0.35;
+    this.book('close', victim, slowHold, 0.4);
+    this.book(Math.random() < 0.3 + this.prm.epic * 0.3 ? 'wide' : 'medium', victim, 1.1 + this.prm.drama * 0.6, 1.1);
+  }
+
+  private mark(label: string): void {
+    this.eventSerial++;
+    this.eventLabel = label;
+    this.eventAt = this.clock;
+  }
+
+  private setShot(kind: ShotKind, subject: number, cut: boolean, eng?: CombatEngine, focus?: readonly number[], transition?: number): void {
     const s = this.shot;
-    const same = s.kind === kind && s.subject === subject;
+    const same = s.kind === kind && (s.subject === subject || GROUP_SHOT.has(kind));
     if (same && !focus) return;
+    if (!same) this.prevInfo = this.info();
+    s.transition = transition ?? TRANSITION[kind] ?? 1.4;
     s.kind = kind;
     s.subject = subject;
     s.age = 0;
@@ -420,10 +558,56 @@ export class Director {
     this.blendT = 0;
     this.shotBeats = 0;
     this.shotLen = kind === 'orbit' ? 4 : kind === 'walk' ? 16 : 4 + Math.floor(Math.random() * 3) * 2;
+    s.duration = this.shotLen * (eng?.spb ?? 0.5);
     if (!same) this.shotNumber++;
     this.shotLabel = SHOT_LABEL[kind];
   }
   private pendingCut = false;
+
+  private info(kind: ShotKind = this.shot.kind, subject = this.shot.subject, current = true): ShotInfo {
+    const ids = subject === 0 ? ['A', 'B'] : ['B', 'A'];
+    const t = SHOT_TYPE[kind];
+    return {
+      type: t,
+      kind,
+      label: SHOT_LABEL[kind],
+      subjectIds: t === 'WIDE' || t === 'TWO_SHOT' || t === 'HIGH_ANGLE' ? ids : ids.slice(0, 1),
+      duration: current ? this.shot.duration : 0,
+      transitionDuration: current ? this.shot.transition : TRANSITION[kind] ?? 1.4,
+      camera: current
+        ? { distance: this.dist.x, fov: this.outFov, angle: this.pitch.x, height: this.camPos.y, shake: this.trauma * this.trauma }
+        : { distance: 0, fov: 0, angle: 0, height: 0, shake: 0 },
+      timeScale: current ? this.timeScale : undefined,
+    };
+  }
+
+  /** Points the current shot is keeping in frame (debug view) */
+  framingPoints(): { data: Float32Array; count: number } {
+    return { data: this.box, count: FIT_SHOT.has(this.shot.kind) ? this.boxN : 0 };
+  }
+
+  /** Snapshot for the UI: what the director is doing and what it plans next */
+  getState(): DirectorState {
+    const q = this.queue[0];
+    let next: ShotInfo | null = null;
+    if (q) {
+      next = this.info(q.kind, q.subject, false);
+      next.duration = Math.max(0, q.at - this.clock);
+    } else {
+      const pool = POOLS[this.phrase];
+      next = this.info(pool[(this.poolIdx + 1 + pool.length) % pool.length]!, this.shot.subject, false);
+    }
+    return {
+      currentShot: this.info(),
+      previousShot: this.prevInfo,
+      nextShot: next,
+      shotTime: this.shot.age,
+      timeScale: this.timeScale,
+      shotNumber: this.shotNumber,
+      event: this.eventLabel,
+      eventAge: this.clock - this.eventAt,
+    };
+  }
 
   // ------------------------------------------------------------------ frame
   update(dt: number, eng: CombatEngine, music: MusicState, prm: NormalizedParams, playing: boolean): void {
@@ -441,14 +625,27 @@ export class Director {
 
     if (!eng.running) {
       this.phrase = 'intro';
+      this.queue.length = 0;
       if (this.shot.kind !== 'establish') this.setShot('establish', 0, false);
-    } else if (playing) {
+    } else if (this.queue.length && this.queue[0]!.at <= this.clock) {
+      // Planned sequence: next booked shot
+      const b = this.queue.shift()!;
+      this.setShot(b.kind, b.subject, false, eng, b.focus, b.transition);
+    } else if (playing && music.section !== this.lastSection) {
+      // The song opens up (drop / climax): reveal on it — a low hero angle or a wide
+      const big = music.section === 'drop' || music.section === 'climax';
+      if (this.lastSection && big && !this.queue.length && this.slow.length === 0 && this.shot.age > 1) {
+        this.setShot(Math.random() < 0.4 + epic * 0.3 ? 'wide' : 'hero', eng.attacker, true, eng);
+        this.mark(music.section === 'drop' ? 'Drop' : 'Climax');
+      }
+      this.lastSection = music.section;
+    } else if (playing && !this.queue.length) {
       const beat = Math.floor(eng.beat);
       if (beat !== this.lastBeat) {
         this.lastBeat = beat;
         this.shotBeats++;
-        const hold = this.shot.age > 2.2;
-        const quick = eng.heat > 0.7 ? 0.6 : 1;
+        const hold = this.shot.age > this.minHold();
+        const quick = (eng.heat > 0.7 ? 0.6 : 1) * (0.75 + prm.drama * 0.6);
         if (hold && this.shotBeats >= this.shotLen * quick && this.slow.length === 0) {
           let next = this.nextFromPool();
           // During the walk-in, keep tracking the walkers; once they stop, frame the posing
@@ -460,14 +657,30 @@ export class Director {
     }
 
     this.computeShot(eng);
+    // Lead the focus by how far the springs will lag behind moving subjects
+    {
+      const k = this.shot.kind;
+      const [a, b] = eng.fighters;
+      const subj = eng.fighters[this.shot.subject]!;
+      const vx = GROUP_SHOT.has(k) ? (a.vx + b.vx) / 2 : subj.vx;
+      const vz = GROUP_SHOT.has(k) ? (a.vz + b.vz) / 2 : subj.vz;
+      const lag = this.blendT < this.shot.transition * 1.6 ? Math.max(0.05, this.shot.transition * 0.42) : 0.28;
+      if (k !== 'orbit' && k !== 'requiem' && k !== 'impact') {
+        this.want.fx += clamp(vx, -8, 8) * lag;
+        this.want.fz += clamp(vz, -8, 8) * lag;
+      }
+    }
     this.initialised = true;
 
     // Drive the rig
     this.shot.age += dt;
     this.blendT += dt;
-    const blending = this.blendT < 1.4;
-    const sf = blending ? 0.6 : 0.28;
-    const sa = blending ? 0.95 : 0.5;
+    // Blend time comes from the shot: impacts snap in, wides drift
+    const T = this.shot.transition;
+    const blending = this.blendT < T * 1.6;
+    const sf = blending ? Math.max(0.05, T * 0.42) : 0.28;
+    const sa = blending ? Math.max(0.07, T * 0.65) : 0.5;
+    const sfov = blending ? Math.max(0.08, T * 0.5) : 0.7;
     const w = this.want;
     if (this.pendingCut) {
       this.pendingCut = false;
@@ -482,8 +695,16 @@ export class Director {
       this.yaw.step(this.yaw.x + wrapAngle(w.yaw - this.yaw.x), sa, dt);
       this.pitch.step(w.pitch, sa, dt);
       this.dist.step(w.dist, sa, dt);
-      this.fov.step(w.fov, 0.7, dt);
+      this.fov.step(w.fov, sfov, dt);
       this.roll.step(w.roll, 0.8, dt);
+    }
+    // Composition guard: if the bodies no longer fit (a knockback, a dash) pull back at once
+    if (FIT_SHOT.has(this.shot.kind) && eng.running) {
+      const need = this.fitDistance(this.fx.x, this.fy.x, this.fz.x, this.yaw.x, this.pitch.x, this.fov.x - 3, 0.95);
+      if (need > this.dist.x) {
+        this.dist.x = damp(this.dist.x, need, 9, dt);
+        this.dist.v = Math.max(this.dist.v, 0);
+      }
     }
     const cp = Math.cos(this.pitch.x);
     this.camTarget.set(this.fx.x, this.fy.x, this.fz.x);
@@ -492,6 +713,14 @@ export class Director {
       this.fy.x + Math.sin(this.pitch.x) * this.dist.x,
       this.fz.x + Math.sin(this.yaw.x) * cp * this.dist.x,
     );
+    // Handheld: slow, organic drift of the operator (never a constant shake)
+    const hh = HANDHELD[SHOT_TYPE[this.shot.kind]] * (0.55 + prm.chaos * 0.6) * (0.7 + prm.drama * 0.4) * (0.8 + eng.heat * 0.4);
+    const c = this.clock;
+    this.camPos.x += (Math.sin(c * 0.53 + 1.3) * 0.6 + Math.sin(c * 1.37) * 0.4) * hh;
+    this.camPos.y += (Math.sin(c * 0.71 + 4.1) * 0.6 + Math.sin(c * 1.13 + 2) * 0.4) * hh * 0.7;
+    this.camPos.z += (Math.sin(c * 0.47 + 2.7) * 0.6 + Math.sin(c * 1.51 + 5) * 0.4) * hh;
+    this.camTarget.x += Math.sin(c * 0.61 + 0.4) * hh * 0.35;
+    this.camTarget.y += Math.sin(c * 0.83 + 3.3) * hh * 0.25;
     this.avoidBodies(eng);
 
     // Beat pulse zoom, fov kicks, shake (smooth, low frequency)
@@ -521,6 +750,11 @@ export class Director {
     this.letterbox = damp(this.letterbox, lbWant, 2, dt);
   }
 
+  /** Shortest time a shot is held before the rhythm of the edit may change it (more drama, longer takes) */
+  private minHold(): number {
+    return 2.2 + this.prm.drama * 1.6;
+  }
+
   private rngPick<T>(a: T[]): T {
     return a[Math.floor(Math.random() * a.length)]!;
   }
@@ -541,6 +775,81 @@ export class Director {
       }
     }
     if (this.camPos.y < 0.2) this.camPos.y = 0.2;
+  }
+
+  /**
+   * Gather the points a shot must keep in frame for the given fighters: the top of the
+   * head, the feet, both hands and the tip of a held weapon.
+   */
+  private collect(eng: CombatEngine, who: number[], extra?: readonly number[]): void {
+    const B = this.box;
+    let n = 0;
+    const push = (x: number, y: number, z: number) => {
+      if (n >= 64) return;
+      B[n * 3] = x;
+      B[n * 3 + 1] = y;
+      B[n * 3 + 2] = z;
+      n++;
+    };
+    for (const i of who) {
+      const f = eng.fighters[i]!;
+      if (!f.present) continue;
+      const j = f.joints;
+      const at = (k: number, dy = 0) => push(j[k * 3]!, j[k * 3 + 1]! + dy, j[k * 3 + 2]!);
+      at(J.head, f.dims.headR * 1.35);
+      at(J.lFoot, -0.1);
+      at(J.rFoot, -0.1);
+      at(J.lHand);
+      at(J.rHand);
+      at(J.pelvis);
+      if (f instanceof Fighter && f.weaponOn) {
+        const h = J.rHand * 3, e = J.rEl * 3;
+        const dx = j[h]! - j[e]!, dy = j[h + 1]! - j[e + 1]!, dz = j[h + 2]! - j[e + 2]!;
+        const l = Math.hypot(dx, dy, dz) || 1;
+        const L = WEAPON_LENGTH[f.weapon];
+        push(j[h]! + (dx / l) * L, j[h + 1]! + (dy / l) * L, j[h + 2]! + (dz / l) * L);
+      }
+    }
+    if (extra) push(extra[0]!, extra[1]!, extra[2]!);
+    this.boxN = n;
+  }
+
+  /** Vertical middle of the collected points (for headroom-balanced framing) */
+  private boxMidY(fallback: number): number {
+    if (!this.boxN) return fallback;
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < this.boxN; i++) {
+      lo = Math.min(lo, this.box[i * 3 + 1]!);
+      hi = Math.max(hi, this.box[i * 3 + 1]!);
+    }
+    return (lo + hi) / 2;
+  }
+
+  /**
+   * Smallest orbit distance at which every collected point is inside `margin` of the frame
+   * (letterbox bars included), for a camera looking at `f` from yaw / pitch with this fov.
+   */
+  private fitDistance(fx: number, fy: number, fz: number, yaw: number, pitch: number, fov: number, margin: number): number {
+    if (!this.boxN) return 0;
+    const cp = Math.cos(pitch);
+    const dx = Math.cos(yaw) * cp, dy = Math.sin(pitch), dz = Math.sin(yaw) * cp;
+    // Camera looks along −d; right = (−d) × up, up' = right × (−d)
+    let rx = dz, rz = -dx;
+    const rl = Math.hypot(rx, rz) || 1;
+    rx /= rl;
+    rz /= rl;
+    const ux = dy * rz, uy = dz * rx - dx * rz, uz = -dy * rx;
+    const tv = Math.tan((fov * Math.PI) / 360) * (1 - 2 * 0.11 * this.letterbox);
+    const th = Math.tan((fov * Math.PI) / 360) * this.aspect;
+    let need = 0;
+    for (let i = 0; i < this.boxN; i++) {
+      const px = this.box[i * 3]! - fx, py = this.box[i * 3 + 1]! - fy, pz = this.box[i * 3 + 2]! - fz;
+      const toward = px * dx + py * dy + pz * dz;
+      const x = Math.abs(px * rx + pz * rz);
+      const y = Math.abs(px * ux + py * uy + pz * uz);
+      need = Math.max(need, x / (th * margin) + toward, y / (tv * margin) + toward);
+    }
+    return need;
   }
 
   /** Desired rig parameters for the current shot */
@@ -575,27 +884,31 @@ export class Director {
         break;
       }
       case 'walk': {
-        w.fx = mx; w.fy = 1.1; w.fz = mz;
+        this.collect(eng, [0, 1]);
+        w.fx = mx; w.fy = this.boxMidY(1.1); w.fz = mz;
         w.yaw = A + side * (Math.PI / 2 + Math.sin(τ * 0.12) * 0.25);
         w.pitch = 0.1;
-        w.dist = Math.max(5.5, d * 0.62 + 3);
         w.fov = 40;
+        w.dist = Math.max(5.5, this.fitDistance(w.fx, w.fy, w.fz, w.yaw, w.pitch, w.fov, 0.72));
         break;
       }
       case 'wide': {
-        w.fx = mx; w.fy = 0.9; w.fz = mz;
+        this.collect(eng, [0, 1]);
+        w.fx = mx; w.fy = Math.max(0.9, this.boxMidY(0.9)); w.fz = mz;
         w.yaw = A + side * (Math.PI / 2 + 0.35 * Math.sin(τ * 0.1));
         w.pitch = 0.2;
-        w.dist = d * 0.8 + 8.5;
         w.fov = 38;
+        w.dist = Math.max(d * 0.8 + 8.5, this.fitDistance(w.fx, w.fy, w.fz, w.yaw, w.pitch, w.fov, 0.55));
         break;
       }
       case 'medium': {
-        w.fx = mx; w.fy = my; w.fz = mz;
+        // Two-shot: both bodies (heads, feet, weapons) framed, with a slow push-in
+        this.collect(eng, [0, 1]);
+        w.fx = mx; w.fy = this.boxMidY(my) + 0.05; w.fz = mz;
         w.yaw = A + side * (Math.PI / 2 + 0.28 * Math.sin(τ * 0.15 + 1));
         w.pitch = 0.08;
-        w.dist = Math.max(3.4, d * 1.05 + 2.4) * (1 - Math.min(τ * 0.02, 0.15));
         w.fov = 34;
+        w.dist = Math.max(3.2, this.fitDistance(w.fx, w.fy, w.fz, w.yaw, w.pitch, w.fov, 0.86 + Math.min(τ * 0.01, 0.08)));
         break;
       }
       case 'ots': {
@@ -608,13 +921,49 @@ export class Director {
         w.fov = 38;
         break;
       }
+      case 'follow': {
+        // One fighter, side-on, with room in front of them in the direction they move
+        const vx = subj.vx, vz = subj.vz;
+        const sp = Math.hypot(vx, vz);
+        const lead = Math.min(1.2, sp * 0.35);
+        const lx = sp > 0.1 ? (vx / sp) * lead : Math.cos(subj.facing) * 0.35;
+        const lz = sp > 0.1 ? (vz / sp) * lead : Math.sin(subj.facing) * 0.35;
+        this.collect(eng, [s.subject], [sx + lx, sy, sz + lz]);
+        w.fx = sx + lx * 0.6; w.fy = this.boxMidY(sy) + 0.05; w.fz = sz + lz * 0.6;
+        const heading = sp > 0.3 ? Math.atan2(vz, vx) : subj.facing;
+        w.yaw = onSide(heading, Math.PI / 2 - 0.25) + Math.sin(τ * 0.3) * 0.05;
+        w.pitch = 0.1;
+        w.fov = 38;
+        w.dist = Math.max(2.6, this.fitDistance(w.fx, w.fy, w.fz, w.yaw, w.pitch, w.fov, 0.66));
+        break;
+      }
+      case 'impact': {
+        // Pushed in on the point of contact, a touch low, both bodies partly in frame
+        // Pushed in on the victim, with the point of contact (a fist, a blade tip) kept in frame
+        const hx = s.focus.x, hy = Math.max(0.4, s.focus.y), hz = s.focus.z;
+        const k = 0.65 + 0.35 * smoothstep(0.2, 1.2, τ);
+        w.fx = lerp(hx, sx, k); w.fy = lerp(hy, sy, k); w.fz = lerp(hz, sz, k);
+        w.yaw = onSide(A + Math.PI / 2, 0.55) + side * τ * 0.06;
+        w.pitch = 0.02;
+        w.fov = 30;
+        const hj = subj.joints;
+        const B = this.box;
+        B.set([hx, hy, hz, sx, sy, sz, hj[J.head * 3]!, hj[J.head * 3 + 1]! + subj.dims.headR, hj[J.head * 3 + 2]!]);
+        this.boxN = 3;
+        w.dist = Math.max(2.1 - Math.min(τ * 0.4, 0.3), this.fitDistance(w.fx, w.fy, w.fz, w.yaw, w.pitch, w.fov, 0.8));
+        roll = -0.04 * side;
+        break;
+      }
       case 'close': {
         const hx = subj.joints[J.head * 3]!, hy = subj.joints[J.head * 3 + 1]!, hz = subj.joints[J.head * 3 + 2]!;
         w.fx = hx; w.fy = hy - 0.08; w.fz = hz;
         w.yaw = onSide(subj.facing, 0.7) + Math.sin(τ * 0.2) * 0.1;
         w.pitch = 0.03;
-        w.dist = 1.55 - Math.min(τ * 0.05, 0.25);
         w.fov = 30;
+        // Head and upper chest must stay in frame even when a blow snaps the head away
+        this.box.set([hx, hy + subj.dims.headR * 1.2, hz, sx, sy + 0.1, sz]);
+        this.boxN = 2;
+        w.dist = Math.max(1.55 - Math.min(τ * 0.05, 0.25), this.fitDistance(w.fx, w.fy, w.fz, w.yaw, w.pitch, w.fov, 0.8));
         roll = 0.03 * side;
         break;
       }
@@ -636,7 +985,9 @@ export class Director {
         break;
       }
       case 'orbit': {
-        w.fx = s.focus.x; w.fy = Math.max(0.6, s.focus.y); w.fz = s.focus.z;
+        // Circle the moment, then drift onto the subject as knockback carries them off the mark
+        const k = smoothstep(0.4, 1.8, τ);
+        w.fx = lerp(s.focus.x, sx, k); w.fy = lerp(Math.max(0.6, s.focus.y), sy, k); w.fz = lerp(s.focus.z, sz, k);
         w.yaw = s.startYaw + side * 0.35 * τ;
         w.pitch = 0.12;
         w.dist = 3.6;
@@ -644,20 +995,22 @@ export class Director {
         break;
       }
       case 'tracking': {
-        w.fx = mx; w.fy = my; w.fz = mz;
+        this.collect(eng, [0, 1]);
+        w.fx = mx; w.fy = this.boxMidY(my); w.fz = mz;
         const behind0 = eng.attacker === 0;
         w.yaw = A + side * (Math.PI / 2 + (behind0 ? 0.6 : -0.6));
         w.pitch = 0.16;
-        w.dist = d + 4.5;
         w.fov = 44;
+        w.dist = Math.max(3.5, this.fitDistance(w.fx, w.fy, w.fz, w.yaw, w.pitch, w.fov, 0.78));
         break;
       }
       case 'aerial': {
-        w.fx = mx; w.fy = Math.max(my, 1.2) + 0.6; w.fz = mz;
+        this.collect(eng, [0, 1]);
+        w.fx = mx; w.fy = Math.max(this.boxMidY(my), 1.2) + 0.3; w.fz = mz;
         w.yaw = A + side * Math.PI / 2;
         w.pitch = -0.2;
-        w.dist = 5.5;
         w.fov = 44;
+        w.dist = Math.max(5, this.fitDistance(w.fx, w.fy, w.fz, w.yaw, w.pitch, w.fov, 0.75));
         break;
       }
       case 'beam': {

@@ -1,15 +1,20 @@
 import { clamp, damp } from '../../../utils/math';
 import { FRAME_STRIDE, SEG } from '../combat/Skeleton';
+import { REGION, SkinData } from '../figure/ParticleSkin';
+import type { V3 as RV3 } from '../figure/ReferenceMesh';
 import { Gen, genEllipsoid, genLine, genTube, GOLD, Out, R, TeamColors, unit, V3 } from './common';
 
 /**
- * A fighter's body as a point cloud with real anatomy: ribcage, abdomen,
- * pelvis, deltoids, tapered limbs with muscle bulges, fists, feet, skull and
- * jaw, glowing eyes and spiky anime hair — modelled on 7.5-head heroic
- * proportions. Points live in their body segment's local frame, so volumes
- * turn with the bones; a bright line down every bone keeps the stick-figure
- * soul. Points are bound by springs: they trail fast motion, get blasted off
- * by hits and fly back, stream away as embers when wounded, and dissolve on death.
+ * A fighter's body as a point cloud. Normally its skin is sampled from the
+ * MakeHuman reference mesh and bound to the skeleton like a skinned mesh (see
+ * figure/ParticleSkin): every point sits in its body segment's local frame, and
+ * points near a joint blend two segments, so shoulders, elbows, hips and knees
+ * bend instead of tearing. Glowing eyes and spiky anime hair are added on top.
+ * Until the reference has loaded (or if it cannot be), a procedural anatomy of
+ * ellipsoids and tubes stands in.
+ *
+ * Points are bound by springs: they trail fast motion, get blasted off by hits
+ * and fly back, stream away as embers when wounded, and dissolve on death.
  */
 
 interface BodyStyle {
@@ -21,9 +26,27 @@ interface BodyStyle {
   colors: TeamColors;
 }
 
-/** Anatomy of one side-agnostic figure, in segment-local metres (+x forward, +y up, +z right) */
-function anatomy(build: number, hairSeed: number): { seg: number; gen: Gen; shade: number; kind: number }[] {
-  const out: { seg: number; gen: Gen; shade: number; kind: number }[] = [];
+type Part = { seg: number; gen: Gen; shade: number; kind: number };
+
+/** Anime hair: spikes swept back off the crown (head-local, neck joint origin) */
+function hair(hairSeed: number, add: (seg: number, gen: Gen, shade: number) => void, lift = 0): void {
+  let hs = hairSeed * 997;
+  const hr = () => ((hs = (hs * 16807) % 2147483647) / 2147483647);
+  for (let k = 0; k < 9; k++) {
+    const z = (hr() - 0.5) * 0.18;
+    const y = 0.22 + hr() * 0.08 + lift;
+    const bx = -0.02 - hr() * 0.08;
+    const tip: V3 = [bx - 0.14 - hr() * 0.12, y + 0.05 + hr() * 0.12, z * 1.8];
+    add(SEG.head, genTube([bx + 0.05, y, z], tip, 0.035, 0.004, 0.75), 0.3);
+  }
+}
+
+/** Shade (core → edge colour) per body region: bright core at the chest, darker extremities */
+const REGION_SHADE = [0.15, 0.1, 0.05, 0.25, 0.35, 0.45, 0.72, 0.35, 0.45, 0.72, 0.6, 0.65, 0.8, 0.6, 0.65, 0.8];
+
+/** Fallback anatomy of one side-agnostic figure, in segment-local metres (+x forward, +y up, +z right) */
+function anatomy(build: number, hairSeed: number): Part[] {
+  const out: Part[] = [];
   const add = (seg: number, gen: Gen, shade: number, kind = 0) => out.push({ seg, gen, shade, kind });
   const m = build; // muscle scale
   // Torso (origin pelvis)
@@ -38,16 +61,7 @@ function anatomy(build: number, hairSeed: number): { seg: number; gen: Gen; shad
   add(SEG.head, genEllipsoid([0, 0.17, 0], [0.112, 0.128, 0.1], 0.6), 0.15);
   add(SEG.head, genEllipsoid([0.045, 0.085, 0], [0.075, 0.06, 0.075], 0.55), 0.15);
   for (const z of [-0.038, 0.038]) add(SEG.head, genEllipsoid([0.1, 0.165, z], [0.008, 0.01, 0.014], 3.2), 0.9, 3);
-  // Anime hair: spikes swept back
-  let hs = hairSeed * 997;
-  const hr = () => ((hs = (hs * 16807) % 2147483647) / 2147483647);
-  for (let k = 0; k < 9; k++) {
-    const z = (hr() - 0.5) * 0.18;
-    const y = 0.22 + hr() * 0.08;
-    const bx = -0.02 - hr() * 0.08;
-    const tip: V3 = [bx - 0.14 - hr() * 0.12, y + 0.05 + hr() * 0.12, z * 1.8];
-    add(SEG.head, genTube([bx + 0.05, y, z], tip, 0.035, 0.004, 0.75), 0.3);
-  }
+  hair(hairSeed, add);
   // Hips (origin pelvis)
   add(SEG.hips, genEllipsoid([0, -0.03, 0], [0.11, 0.1, 0.155], 0.55), 0.25);
   for (const z of [-0.07, 0.07]) add(SEG.hips, genEllipsoid([-0.05, -0.08, z], [0.07, 0.08, 0.075], 0.55), 0.3);
@@ -77,6 +91,14 @@ function anatomy(build: number, hairSeed: number): { seg: number; gen: Gen; shad
 export class BodyCloud {
   readonly seg: Uint8Array;
   readonly local: Float32Array;
+  /** Second segment and its weight (linear blend skinning near joints) */
+  readonly seg2: Uint8Array;
+  readonly w2: Float32Array;
+  readonly local2: Float32Array;
+  /** Body region of each point (REGION in figure/ReferenceMesh; 255 = procedural) */
+  readonly region: Uint8Array;
+  /** What the skin was last built from (ParticleSystem rebuilds when it changes) */
+  skinKey = '';
   readonly bright: Float32Array;
   readonly key: Float32Array;
   readonly rate: Float32Array;
@@ -93,9 +115,13 @@ export class BodyCloud {
   dissolving = false;
   dissolveT = 0;
 
-  constructor(readonly n: number, readonly off: number, build = 1, hairSeed = 1) {
+  constructor(readonly n: number, readonly off: number, build = 1, private readonly hairSeed = 1) {
     this.seg = new Uint8Array(n);
     this.local = new Float32Array(n * 3);
+    this.seg2 = new Uint8Array(n);
+    this.w2 = new Float32Array(n);
+    this.local2 = new Float32Array(n * 3);
+    this.region = new Uint8Array(n).fill(255);
     this.bright = new Float32Array(n);
     this.key = new Float32Array(n);
     this.rate = new Float32Array(n);
@@ -150,6 +176,7 @@ export class BodyCloud {
         b = 1.6 + R() * 0.6; // scattered bright "stars" on the skin
       }
       this.seg[i] = part.seg;
+      this.seg2[i] = part.seg;
       this.local[i * 3] = tmp[0]!;
       this.local[i * 3 + 1] = tmp[1]!;
       this.local[i * 3 + 2] = tmp[2]!;
@@ -161,12 +188,84 @@ export class BodyCloud {
     }
   }
 
+  /**
+   * Replace the procedural anatomy with a skin sampled from the reference mesh.
+   * Layout: eyes, hair spikes, then the surface (7 % of it lifted off along the normal as a faint halo).
+   */
+  applySkin(skin: SkinData, eyes: [RV3, RV3], key: string): void {
+    const n = this.n;
+    const nEyes = 20;
+    const hairParts: Part[] = [];
+    hair(this.hairSeed, (seg, gen, shade) => hairParts.push({ seg, gen, shade, kind: 0 }), -0.035);
+    const hairW = hairParts.reduce((a, p) => a + p.gen.w, 0);
+    const nHair = Math.round(n * 0.045);
+    const tmp = [0, 0, 0];
+    let k = 0;
+    const put = (i: number, seg: number, x: number, y: number, z: number, kind: number, bright: number, shade: number, region: number) => {
+      this.seg[i] = seg;
+      this.seg2[i] = seg;
+      this.w2[i] = 0;
+      this.local[i * 3] = x;
+      this.local[i * 3 + 1] = y;
+      this.local[i * 3 + 2] = z;
+      this.kind[i] = kind;
+      this.bright[i] = bright * (0.85 + R() * 0.3);
+      this.shade[i] = clamp(shade + (R() - 0.5) * 0.3);
+      this.key[i] = R();
+      this.rate[i] = 18 + R() * 26;
+      this.region[i] = region;
+    };
+    for (let i = 0; i < nEyes; i++, k++) {
+      const e = eyes[i < nEyes / 2 ? 0 : 1];
+      put(k, SEG.head, e[0] + (R() - 0.5) * 0.008, e[1] + (R() - 0.5) * 0.008, e[2] + (R() - 0.5) * 0.012, 3, 0.9, 0.9, REGION.HEAD);
+    }
+    for (let i = 0; i < nHair; i++, k++) {
+      let r = R() * hairW;
+      let part = hairParts[hairParts.length - 1]!;
+      for (const p of hairParts) if ((r -= p.gen.w) <= 0) {
+        part = p;
+        break;
+      }
+      part.gen.f(tmp);
+      put(k, SEG.head, tmp[0]!, tmp[1]!, tmp[2]!, 0, 1, part.shade, REGION.HEAD);
+    }
+    for (let s = 0; k < n; k++, s++) {
+      const j = s % skin.count;
+      const reg = skin.region[j]!;
+      const halo = R() < 0.07;
+      let b = reg === REGION.HAND_L || reg === REGION.HAND_R ? 1.15 : 1;
+      if (!halo && R() < 0.05) b = 1.6 + R() * 0.6; // scattered bright "stars" on the skin
+      const push = halo ? 0.02 + R() * 0.05 : 0;
+      put(k, skin.seg[j]!,
+        skin.local[j * 3]! + skin.normal[j * 3]! * push,
+        skin.local[j * 3 + 1]! + skin.normal[j * 3 + 1]! * push,
+        skin.local[j * 3 + 2]! + skin.normal[j * 3 + 2]! * push,
+        halo ? 1 : 0, halo ? 0.3 : b, REGION_SHADE[reg]!, reg);
+      if (!halo && skin.w2[j]! > 0) {
+        this.seg2[k] = skin.seg2[j]!;
+        this.w2[k] = skin.w2[j]!;
+        this.local2[k * 3] = skin.local2[j * 3]!;
+        this.local2[k * 3 + 1] = skin.local2[j * 3 + 1]!;
+        this.local2[k * 3 + 2] = skin.local2[j * 3 + 2]!;
+      }
+    }
+    this.skinKey = key;
+  }
+
   private target(i: number, f: Float32Array, out: number[]): void {
     const o = this.seg[i] * FRAME_STRIDE;
     const x = this.local[i * 3], y = this.local[i * 3 + 1], z = this.local[i * 3 + 2];
     out[0] = f[o] + f[o + 3] * x + f[o + 4] * y + f[o + 5] * z;
     out[1] = f[o + 1] + f[o + 6] * x + f[o + 7] * y + f[o + 8] * z;
     out[2] = f[o + 2] + f[o + 9] * x + f[o + 10] * y + f[o + 11] * z;
+    const w = this.w2[i];
+    if (w > 0) {
+      const q = this.seg2[i] * FRAME_STRIDE;
+      const a = this.local2[i * 3], b = this.local2[i * 3 + 1], c = this.local2[i * 3 + 2];
+      out[0] += (f[q] + f[q + 3] * a + f[q + 4] * b + f[q + 5] * c - out[0]) * w;
+      out[1] += (f[q + 1] + f[q + 6] * a + f[q + 7] * b + f[q + 8] * c - out[1]) * w;
+      out[2] += (f[q + 2] + f[q + 9] * a + f[q + 10] * b + f[q + 11] * c - out[2]) * w;
+    }
   }
 
   place(frames: Float32Array): void {

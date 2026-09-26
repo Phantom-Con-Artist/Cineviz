@@ -2,12 +2,14 @@ import { CombatEvent, CombatEventType, PhraseKind, Vector3Tuple } from '../../..
 import { MusicState } from '../../../types/music';
 import { SeededRandom } from '../../../utils/random';
 import { clamp, damp, dampAngle, smoothstep, wobble, wrapAngle } from '../../../utils/math';
-import { FRAME_STRIDE, J, JOINT_COUNT, P, PARAM_COUNT, SEG_COUNT, solvePose } from './Skeleton';
+import { DEFAULT_DIMS, DEFAULT_PROPORTIONS, Dims, dimsOf, FRAME_STRIDE, J, JOINT_COUNT, P, PARAM_COUNT, Proportions, SEG_COUNT, solvePose } from './Skeleton';
 import { Element, MOVES, MoveDef, MoveInstance, MoveName, reachOf, SLASHES, STANCE, StanceName, Zone } from './Moves';
 import { Pet, PET_KINDS, Summon, SUMMON_KINDS, SUMMON_STYLE, SummonKind } from './Entities';
 import { Archetype, ArchetypeId, ARCHETYPE_IDS, ARCHETYPES, TechId, WEAPON_LENGTH, WeaponType } from './Archetypes';
 import { FxAnchor, FxKind, TechFx } from './TechFx';
 import { TECHNIQUES } from './Techniques';
+import { DEFAULT_PROFILE, MotionBody, PROFILES } from './Motion';
+import { BUILDS } from '../figure/Builds';
 
 export type { WeaponType } from './Archetypes';
 export { WEAPON_LENGTH } from './Archetypes';
@@ -20,6 +22,7 @@ export interface NormalizedParams {
   sadness: number;
   chaos: number;
   aura: number;
+  drama: number;
 }
 
 /** What the choreographer knows about the whole song ahead of time */
@@ -73,6 +76,11 @@ export class Actor {
   readonly joints = new Float32Array(JOINT_COUNT * 3);
   /** Segment frames (origin + rotation) for volumetric bodies */
   readonly frames = new Float32Array(SEG_COUNT * FRAME_STRIDE);
+  /** Physical layer: `pose` is the intent, `motion.body` the sprung pose that gets solved */
+  readonly motion: MotionBody;
+  /** Body type: bone lengths for the skeleton, girth etc. for the particle skin */
+  proportions: Readonly<Proportions> = DEFAULT_PROPORTIONS;
+  dims: Readonly<Dims> = DEFAULT_DIMS;
   x = 0;
   z = 0;
   /** Where the stage wants this actor */
@@ -84,6 +92,17 @@ export class Actor {
   kx = 0;
   kz = 0;
   posRate = 5;
+  /** Ground velocity (m/s), second-order follow of the stage target */
+  vx = 0;
+  vz = 0;
+  private lastX = NaN;
+  private lastZ = NaN;
+  private lastFacing = NaN;
+  facingVel = 0;
+  airVel = 0;
+  private lastAirTarget = 0;
+  /** Vertical speed of a touchdown this frame */
+  landing = 0;
   air = 0;
   airTarget = 0;
   airRate = 4;
@@ -111,6 +130,54 @@ export class Actor {
 
   constructor(public team: number) {
     this.pose.set(STANCE.guard);
+    this.motion = new MotionBody(team);
+    this.motion.snap(this.pose);
+  }
+
+  /** Pose changed discontinuously (spawn, reset): the body follows at once instead of springing */
+  snapPose(): void {
+    this.motion.snap(this.pose);
+    this.vx = this.vz = this.facingVel = this.airVel = 0;
+  }
+
+  /** Second-order follow of the stage position, facing and height (called by the engine) */
+  integrateBody(dt: number, gx: number, gz: number, want: number): boolean {
+    const teleported = this.x !== this.lastX || this.z !== this.lastZ;
+    if (teleported) this.vx = this.vz = 0;
+    if (this.facing !== this.lastFacing) this.facingVel = 0;
+    const prof = this.motion.profile;
+    const w = Math.max(0.1, this.posRate * 1.55);
+    const A = prof.acceleration * w * w;
+    const D = 2 * w * prof.deceleration;
+    const n = Math.min(8, Math.ceil(dt * 90));
+    const h = dt / n;
+    const wf = 9 * Math.sqrt(prof.reactionSpeed / prof.mass);
+    // Air: an impulse up, then decelerating to the apex; the fall accelerates and lands hard
+    if (this.airTarget > this.lastAirTarget + 0.05 && this.airTarget > this.air) this.airVel = Math.max(this.airVel, (this.airTarget - this.air) * this.airRate * 1.05);
+    this.lastAirTarget = this.airTarget;
+    const wa = this.airRate * 1.4;
+    this.landing = 0;
+    for (let s = 0; s < n; s++) {
+      this.vx += (A * (gx - this.x) - D * this.vx) * h;
+      this.vz += (A * (gz - this.z) - D * this.vz) * h;
+      this.x += this.vx * h;
+      this.z += this.vz * h;
+      const err = wrapAngle(want - this.facing);
+      this.facingVel = Math.max(-16, Math.min(16, this.facingVel + (wf * wf * err - 1.9 * wf * this.facingVel) * h));
+      this.facing += this.facingVel * h;
+      const za = this.airTarget > this.air ? 1 : 0.8;
+      this.airVel += (wa * wa * (this.airTarget - this.air) - 2 * za * wa * this.airVel) * h;
+      this.air += this.airVel * h;
+      if (this.air < 0) {
+        if (this.airVel < -0.6) this.landing = Math.max(this.landing, -this.airVel);
+        this.air = 0;
+        this.airVel = 0;
+      }
+    }
+    this.lastX = this.x;
+    this.lastZ = this.z;
+    this.lastFacing = this.facing;
+    return teleported;
   }
 
   get base(): Float32Array {
@@ -120,6 +187,11 @@ export class Actor {
   play(def: MoveDef, start: number, unit: number, aim = 0): void {
     this.move = new MoveInstance(def, this.base, this.pose, start, unit);
     this.move.aim = aim;
+  }
+
+  setProportions(p: Readonly<Proportions>): void {
+    this.proportions = p;
+    this.dims = p === DEFAULT_PROPORTIONS ? DEFAULT_DIMS : dimsOf(p);
   }
 
   setStance(name: StanceName): void {
@@ -289,7 +361,7 @@ export class CombatEngine {
   forceTech: TechId | null = null;
   forceArch: [ArchetypeId | null, ArchetypeId | null] = [null, null];
   private music: MusicState | null = null;
-  private prm: NormalizedParams = { fight: 0.75, epic: 0.8, slowMotion: 0.6, sadness: 0.25, chaos: 0.4, aura: 0.85 };
+  private prm: NormalizedParams = { fight: 0.75, epic: 0.8, slowMotion: 0.6, sadness: 0.25, chaos: 0.4, aura: 0.85, drama: 0.6 };
 
   init(seed: number): void {
     this.rng = new SeededRandom(seed);
@@ -310,7 +382,11 @@ export class CombatEngine {
       const f = this.fighters[i]!;
       f.arch = ARCHETYPES[id];
       f.weapon = f.arch.weapon ?? this.rng.choice(bare);
+      f.motion.setProfile(PROFILES[id] ?? DEFAULT_PROFILE);
+      f.setProportions(BUILDS[id] ?? DEFAULT_PROPORTIONS);
     });
+    this.fighters.forEach((f, i) => f.motion.reseed(seed, i));
+    this.clones.forEach((c, i) => c.motion.reseed(seed, 10 + i));
     // Familiars: often one fighter brings a pet, now and then both do
     const r = this.rng.next();
     const k0 = this.rng.choice(PET_KINDS);
@@ -341,6 +417,7 @@ export class CombatEngine {
       f.recentTech = [];
       f.setStance('relaxed');
       f.pose.set(STANCE.relaxed);
+      f.snapPose();
       f.move = null;
       f.air = f.airTarget = 0;
       f.ox = f.oz = f.kx = f.kz = 0;
@@ -360,7 +437,7 @@ export class CombatEngine {
     }
     this.fighters[0].facing = ang;
     this.fighters[1].facing = ang + Math.PI;
-    for (const f of this.fighters) solvePose(f.pose, f.joints, f.x, f.z, f.facing, 0, f.frames);
+    for (const f of this.fighters) solvePose(f.motion.body, f.joints, f.x, f.z, f.facing, 0, f.frames, f.dims);
   }
 
   // ------------------------------------------------------------------ song control
@@ -546,20 +623,17 @@ export class CombatEngine {
     a.oz = damp(a.oz, 0, 1.5, dt);
     const px = a.x;
     const pz = a.z;
-    a.x = damp(a.x, a.tx + a.ox, a.posRate, dt);
-    a.z = damp(a.z, a.tz + a.oz, a.posRate, dt);
-    const vx = (a.x - px) / dt;
-    const vz = (a.z - pz) / dt;
-    a.speed = Math.hypot(vx, vz);
-    a.air = damp(a.air, a.airTarget, a.airRate, dt);
-
     const look = a.faceTarget ?? foe;
-    a.facing = dampAngle(a.facing, Math.atan2(look.z - a.z, look.x - a.x), 8, dt);
+    const teleported = a.integrateBody(dt, a.tx + a.ox, a.tz + a.oz, Math.atan2(look.z - a.z, look.x - a.x));
+    const vx = teleported ? 0 : (a.x - px) / dt;
+    const vz = teleported ? 0 : (a.z - pz) / dt;
+    a.speed = Math.hypot(vx, vz);
 
     let legsBusy = a.air > 0.15;
     let aim = 0;
+    const bpm = this.music?.bpm ?? 120;
     if (a.move) {
-      a.move.evaluate(this.beat, a.pose);
+      a.motion.sample(a.move, this.beat, bpm, a.pose);
       const d = a.move.def;
       const u = a.move.progress(this.beat);
       // Line the striking tip up with the target around the impact
@@ -567,26 +641,8 @@ export class CombatEngine {
       legsBusy ||= u < 1.7 && (d.limb === J.lFoot || d.limb === J.rFoot || d.limb === J.lKn || d.limb === J.rKn || !!d.air || d === MOVES.walk || d === MOVES.dash);
     } else a.pose.set(a.base);
 
-    // Footwork: while the body travels, the legs step (stride ≈ 0.55 m) instead of gliding
-    if (!legsBusy && a.speed > 0.25) {
-      const c = Math.cos(a.facing), s = Math.sin(a.facing);
-      const fwd = vx * c + vz * s;
-      const side = -vx * s + vz * c;
-      a.gait += ((a.speed * dt) / 0.55) * Math.PI * (fwd < -0.1 ? -1 : 1);
-      const amp = clamp(a.speed / 2.2) * 0.9;
-      const sg = Math.sin(a.gait);
-      const cg = Math.cos(a.gait);
-      a.pose[P.lHipP] += sg * 0.42 * amp;
-      a.pose[P.rHipP] -= sg * 0.42 * amp;
-      a.pose[P.lKn] += Math.max(0, cg) * 0.75 * amp;
-      a.pose[P.rKn] += Math.max(0, -cg) * 0.75 * amp;
-      const lat = clamp(Math.abs(side) / (a.speed + 0.01)) * amp;
-      a.pose[P.lHipA] += Math.max(0, sg) * 0.3 * lat;
-      a.pose[P.rHipA] += Math.max(0, -sg) * 0.3 * lat;
-      a.pose[P.lean] += clamp(fwd / 6, -0.15, 0.25);
-    }
-
-    // Rhythm: a knee bounce on the beat that grows with the heat; breathing; chaos jitter
+    // Rhythm: a knee bounce on the beat that grows with the heat; chaos jitter
+    // (breathing, weight shifts and stepping live in the motion layer)
     a.bounce = damp(a.bounce, a.stanceKey === 'relaxed' ? 0.25 : 1, 1.5, dt);
     const beatFrac = this.beat - Math.floor(this.beat);
     const bounce = Math.pow(1 - beatFrac, 3) * (0.03 + 0.12 * this.heat) * a.bounce;
@@ -594,15 +650,21 @@ export class CombatEngine {
     a.pose[P.rKn] += bounce * 0.9;
     a.pose[P.lHipP] += bounce * 0.4;
     a.pose[P.rHipP] += bounce * 0.35;
-    a.pose[P.lean] += Math.sin(this.time * 1.6 + a.team) * 0.025;
-    a.pose[P.head] += Math.sin(this.time * 1.1 + a.team * 2) * 0.03;
     const ch = this.prm.chaos * 0.05 * this.heat;
     if (ch > 0) {
       a.pose[P.lShP] += wobble(this.time * 3, a.team + 1) * ch;
       a.pose[P.rShP] += wobble(this.time * 3, a.team + 5) * ch;
     }
 
-    solvePose(a.pose, a.joints, a.x, a.z, a.facing + aim, a.air, a.frames);
+    const c = Math.cos(a.facing), sn = Math.sin(a.facing);
+    a.motion.step({
+      dt, time: this.time, beat: this.beat, pose: a.pose, move: a.move,
+      vlx: vx * c + vz * sn, vlz: -vx * sn + vz * c, speed: a.speed, facingVel: a.facingVel,
+      legsFree: !legsBusy, relaxed: a.stanceKey === 'relaxed', landing: a.landing, heat: this.heat,
+    });
+    a.gait = a.motion.gait;
+
+    solvePose(a.motion.body, a.joints, a.x, a.z, a.facing + aim, a.air, a.frames, a.dims);
     a.hitFlash = Math.max(0, a.hitFlash - dt * 3);
     a.dashing = Math.max(0, a.dashing - dt);
   }
@@ -662,6 +724,9 @@ export class CombatEngine {
    * attacker keeps the pressure on); heavy ones throw the target away.
    */
   knock(a: Actor, dir: Vector3Tuple, strength: number): void {
+    // The body takes the blow before the stage moves it: head snap, torso fold, off-balance
+    const fc = Math.cos(a.facing), fs = Math.sin(a.facing);
+    a.motion.push(dir[0] * fc + dir[2] * fs, -dir[0] * fs + dir[2] * fc, strength);
     if (!(a instanceof Fighter)) {
       a.kx += dir[0] * strength;
       a.kz += dir[2] * strength;
@@ -776,9 +841,13 @@ export class CombatEngine {
     this.at(t - unit, () => {
       if (!att.active || (att instanceof Fighter && (att.dead || !att.present))) return;
       const wl = att instanceof Fighter && att.weaponOn && move.weapon ? WEAPON_LENGTH[att.weapon] : 0;
-      const reach = reachOf(move, att.base, wl);
+      const reach = reachOf(move, att.base, wl, att.dims);
       this.closeIn(att, def, reach.sep, t - unit * 0.1);
       att.play(move, t - unit, unit, reach.aim);
+      if (att instanceof Fighter) {
+        const weight = opts.critical ? 1 : Math.min(0.9, 0.35 + 0.3 * (move.power ?? 1) * (opts.knock ?? 1));
+        this.emit('windup', att.joint(J.chest), this.dirBetween(att, def), weight, att.team, def.team, { beats: unit, critical: !!opts.critical, label: name });
+      }
       if (move.air) {
         att.airTarget = move.air;
         att.airRate = 7;
@@ -810,6 +879,23 @@ export class CombatEngine {
     this.at(t, () => this.contact(att, def, move, t, outcome, opts, false));
   }
 
+  /**
+   * Intent-level attack: says what and how hard, the body decides how to execute it.
+   * Intensity picks between the archetype's quick and committal moves; the MotionProfile
+   * of the attacker does the rest (wind-up depth, lag, recoil, recovery).
+   */
+  attack(att: Fighter, def: Fighter, o: { type: 'punch' | 'kick' | 'slash' | 'any'; intensity: number }, t: number, unit = 1, outcome: Outcome = 'hit'): MoveName {
+    const pool = o.intensity > 0.6 ? att.arch.heavy : att.arch.light;
+    const match = pool.filter((n) => {
+      const l = MOVES[n].limb;
+      const foot = l === J.lFoot || l === J.rFoot || l === J.lKn || l === J.rKn;
+      return o.type === 'any' || (o.type === 'kick' ? foot : o.type === 'slash' ? !!MOVES[n].weapon : !foot && !MOVES[n].weapon);
+    });
+    const name = this.rng.choice(match.length ? match : pool);
+    this.strike(att, def, name, t, unit, outcome, { knock: 0.6 + o.intensity * 0.8, critical: o.intensity > 0.9 });
+    return name;
+  }
+
   private contact(att: Actor, def: Fighter, move: MoveDef, t: number, outcome: Outcome, opts: StrikeOpts, light: boolean): void {
     if (!att.active || def.dead || !def.present) return;
     if (att instanceof Fighter && (att.dead || !att.present)) return;
@@ -818,11 +904,12 @@ export class CombatEngine {
     const dir = this.dirBetween(att, def);
     const el = opts.element ?? (att instanceof Fighter ? att.element(move) : undefined);
     const A = att instanceof Fighter ? att : this.fighters[1 - def.team]!;
-    const zone: Zone = reachOf(move, att.base, armedHit && att instanceof Fighter ? WEAPON_LENGTH[att.weapon] : 0).zone;
+    const zone: Zone = reachOf(move, att.base, armedHit && att instanceof Fighter ? WEAPON_LENGTH[att.weapon] : 0, att.dims).zone;
     if (outcome === 'hit') {
       if (light) {
         def.play(MOVES[zone === 'high' ? 'hitHead' : zone === 'low' ? 'hitLow' : 'hitBody'], t, 0.5);
         this.knock(def, dir, 1.2);
+        att.motion.recoil(0.4, 'hit');
         def.hitFlash = 0.7;
         this.damage(def, 1.5, att.team, t);
         this.emit('hit', pos, dir, 0.4, att.team, def.team, { sub: el });
@@ -837,7 +924,9 @@ export class CombatEngine {
       def.meter = Math.min(1, def.meter + 0.06);
       this.damage(def, opts.damage ?? (crit ? 16 : 4 + this.rng.range(0, 3)) * (move.power ?? 1), att.team, t);
       this.emit('hit', pos, dir, crit ? 1 : 0.55, att.team, def.team, { critical: crit, sub: el });
+      att.motion.recoil((move.power ?? 1) * (crit ? 1.4 : 1), 'hit');
     } else if (outcome === 'block' || outcome === 'parry') {
+      att.motion.recoil(move.power ?? 1, 'block');
       const armed = def.weaponOn && armedHit;
       this.knock(def, dir, armed ? 2 : 1.2);
       this.knock(att, [-dir[0], 0, -dir[2]], armed ? 1.1 : 0.35);
@@ -845,6 +934,7 @@ export class CombatEngine {
       def.meter = Math.min(1, def.meter + 0.05);
       this.emit('block', pos, dir, armed ? 0.85 : 0.5, att.team, def.team, { critical: armed || outcome === 'parry', sub: el });
     } else if (!light) {
+      att.motion.recoil(move.power ?? 1, 'miss');
       this.emit('dodge', def.joint(J.chest), dir, 0.5, def.team, att.team);
     }
   }
@@ -1043,6 +1133,9 @@ export class CombatEngine {
         c.x = A.x;
         c.z = A.z;
         c.pose.set(A.pose);
+        c.motion.copyFrom(A.motion);
+        c.setProportions(A.proportions);
+        c.vx = c.vz = c.facingVel = c.airVel = 0;
         c.setStance(A.arch.stance);
         c.tx = D.x + Math.cos(ang) * radius;
         c.tz = D.z + Math.sin(ang) * radius;
@@ -1151,6 +1244,7 @@ export class CombatEngine {
       f.z = f.tz;
       f.setStance('relaxed');
       f.pose.set(STANCE.relaxed);
+      f.snapPose();
       f.move = null;
       f.bounce = 0;
     }
@@ -1582,8 +1676,8 @@ export class CombatEngine {
     const pick = (f: Fighter) => this.rng.choice(f.arch.light);
     const unit = this.grid(0.4);
     this.at(s, () => {
-      const ra = reachOf(MOVES[pick(a)], a.base, a.weaponOn ? WEAPON_LENGTH[a.weapon] : 0).sep;
-      const rb = reachOf(MOVES[pick(b)], b.base, b.weaponOn ? WEAPON_LENGTH[b.weapon] : 0).sep;
+      const ra = reachOf(MOVES[pick(a)], a.base, a.weaponOn ? WEAPON_LENGTH[a.weapon] : 0, a.dims).sep;
+      const rb = reachOf(MOVES[pick(b)], b.base, b.weaponOn ? WEAPON_LENGTH[b.weapon] : 0, b.dims).sep;
       this.stageTo((ra + rb) / 2 - 0.15, 3, this.rng.range(-0.3, 0.3));
     });
     for (let k = 1; k <= 3; k++) {

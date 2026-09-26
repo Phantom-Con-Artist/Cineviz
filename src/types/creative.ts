@@ -15,6 +15,8 @@ export interface CreativeParameters {
   chaos: number;
   /** Radiance, particle density of fighter silhouettes and energy emission */
   aura: number;
+  /** Cinematic weight: longer, more deliberate shots, close-ups and low angles, impact sequences */
+  drama: number;
 }
 
 export interface GenerationSettings {
@@ -31,6 +33,7 @@ export const DEFAULT_CREATIVE_PARAMETERS: CreativeParameters = {
   sadness: 25,
   chaos: 40,
   aura: 85,
+  drama: 60,
 };
 
 export const DEFAULT_GENERATION_SETTINGS: GenerationSettings = {

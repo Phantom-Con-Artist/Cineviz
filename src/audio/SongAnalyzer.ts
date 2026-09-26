@@ -28,7 +28,11 @@ export interface SongAnalysis {
   outroStart: number;
   /** Loudness overview for the UI (64 buckets) */
   profile: number[];
+  /** Peak envelope for the timeline waveform (WAVEFORM_BUCKETS values, 0 … 1) */
+  waveform: Float32Array;
 }
+
+export const WAVEFORM_BUCKETS = 1200;
 
 const HOP = 512;
 
@@ -234,7 +238,24 @@ export function analyzeSong(buf: AudioBuffer): SongAnalysis {
   const profile: number[] = [];
   for (let k = 0; k < 64; k++) profile.push(meanOf(Math.floor((k * nb) / 64), Math.floor(((k + 1) * nb) / 64)));
 
-  return { duration: buf.duration, bpm, beats, downbeatOffset, intensity, drops, introEnd, outroStart, profile };
+  // Waveform: RMS-ish peak per bucket, normalised to the loudest bucket
+  const waveform = new Float32Array(WAVEFORM_BUCKETS);
+  const per = Math.max(1, Math.floor(len / WAVEFORM_BUCKETS));
+  let top = 1e-6;
+  for (let k = 0; k < WAVEFORM_BUCKETS; k++) {
+    let pk = 0, sq = 0;
+    const a = k * per, b = Math.min(len, a + per);
+    for (let i = a; i < b; i += 4) {
+      const x = Math.abs(mono[i]!);
+      if (x > pk) pk = x;
+      sq += x * x;
+    }
+    waveform[k] = pk * 0.45 + Math.sqrt(sq / Math.max(1, (b - a) / 4)) * 0.55;
+    top = Math.max(top, waveform[k]!);
+  }
+  for (let k = 0; k < WAVEFORM_BUCKETS; k++) waveform[k] = waveform[k]! / top;
+
+  return { duration: buf.duration, bpm, beats, downbeatOffset, intensity, drops, introEnd, outroStart, profile, waveform };
 }
 
 function smooth(a: Float32Array, r: number): Float32Array {

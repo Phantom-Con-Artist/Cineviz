@@ -40,16 +40,53 @@ export const BONES: ReadonlyArray<readonly [number, number, number]> = [
   [J.pelvis, J.rHip, 0.8], [J.rHip, J.rKn, 1.1], [J.rKn, J.rFoot, 1.0],
 ];
 
-export const HEAD_RADIUS = 0.13;
-const SPINE = 0.52;
-const NECK = 0.13;
-const HEAD_OFF = 0.17;
-const SHOULDER = 0.19;
-const UPPER = 0.31;
-const FORE = 0.29;
-const HIP = 0.1;
-const THIGH = 0.45;
-const SHIN = 0.45;
+/**
+ * Bone lengths (metres). Neck and head follow the MakeHuman reference proportions
+ * (the fighters' particle skin is sampled from it); limbs stay slightly heroic.
+ */
+export interface Dims {
+  spine: number;
+  neck: number;
+  /** Neck joint → head centre */
+  headOff: number;
+  headR: number;
+  /** Half the distance between the shoulder joints */
+  shoulder: number;
+  upper: number;
+  fore: number;
+  hip: number;
+  thigh: number;
+  shin: number;
+}
+export const DEFAULT_DIMS: Readonly<Dims> = {
+  spine: 0.52, neck: 0.08, headOff: 0.14, headR: 0.12, shoulder: 0.19, upper: 0.3, fore: 0.28, hip: 0.12, thigh: 0.45, shin: 0.45,
+};
+export const HEAD_RADIUS = DEFAULT_DIMS.headR;
+
+/**
+ * Body type. The same poses, moves and motion system drive every build; only the
+ * bone lengths (and the particle skin's girth) change.
+ */
+export interface Proportions {
+  /** Overall scale */
+  height: number;
+  /** Girth of the particle skin (not the bones) */
+  bodyScale: number;
+  shoulderWidth: number;
+  limbLength: number;
+  torsoScale: number;
+  headScale: number;
+}
+export const DEFAULT_PROPORTIONS: Readonly<Proportions> = { height: 1, bodyScale: 1, shoulderWidth: 1, limbLength: 1, torsoScale: 1, headScale: 1 };
+
+export function dimsOf(p: Proportions): Dims {
+  const d = DEFAULT_DIMS, h = p.height, l = h * p.limbLength, t = h * p.torsoScale, k = h * p.headScale;
+  return {
+    spine: d.spine * t, neck: d.neck * t, headOff: d.headOff * k, headR: d.headR * k,
+    shoulder: d.shoulder * h * p.shoulderWidth, upper: d.upper * l, fore: d.fore * l,
+    hip: d.hip * h * (0.5 + 0.5 * p.bodyScale), thigh: d.thigh * l, shin: d.shin * l,
+  };
+}
 
 export function makePose(base: Float32Array | null, spec: PoseSpec): Float32Array {
   const out = base ? Float32Array.from(base) : new Float32Array(PARAM_COUNT);
@@ -100,41 +137,41 @@ export const FRAME_STRIDE = 12;
 const SEG_ORIGIN = [J.pelvis, J.neck, J.pelvis, J.lSh, J.lEl, J.rSh, J.rEl, J.lHip, J.lKn, J.rHip, J.rKn, J.lFoot, J.rFoot];
 const segM: M3[] = Array.from({ length: SEG_COUNT }, () => [1, 0, 0, 0, 1, 0, 0, 0, 1]);
 
-function limb(side: number, root: number, a: number, b: number, c: number, pitch: number, abd: number, bend: number, frame: M3, isArm: boolean, segA: number, segB: number): void {
+function limb(d: Dims, side: number, root: number, a: number, b: number, c: number, pitch: number, abd: number, bend: number, frame: M3, isArm: boolean, segA: number, segB: number): void {
   const ab = rx(-side * abd);
-  if (isArm) put(a, root, frame, 0, -0.03, side * SHOULDER);
-  else put(a, root, frame, 0, -0.03, side * HIP);
+  if (isArm) put(a, root, frame, 0, -0.03, side * d.shoulder);
+  else put(a, root, frame, 0, -0.03, side * d.hip);
   const first = mul(frame, mul(ab, rz(pitch)));
-  put(b, a, first, 0, isArm ? -UPPER : -THIGH, 0);
+  put(b, a, first, 0, isArm ? -d.upper : -d.thigh, 0);
   // Elbows bend forward, knees backward
   const second = mul(frame, mul(ab, rz(isArm ? pitch + bend : pitch - bend)));
-  put(c, b, second, 0, isArm ? -FORE : -SHIN, 0);
+  put(c, b, second, 0, isArm ? -d.fore : -d.shin, 0);
   segM[segA] = first;
   segM[segB] = second;
 }
 
 /** How far below each joint the body surface reaches (for the floor lock) */
-const JOINT_CLEARANCE = [0.12, 0.12, 0.06, HEAD_RADIUS, 0.07, 0.05, 0.06, 0.07, 0.05, 0.06, 0.09, 0.06, 0.08, 0.09, 0.06, 0.08];
+const JOINT_CLEARANCE = [0.12, 0.12, 0.06, 0, 0.07, 0.05, 0.06, 0.07, 0.05, 0.06, 0.09, 0.06, 0.08, 0.09, 0.06, 0.08];
 
 /**
  * Pose → world joints (+ segment frames). The figure is dropped so its lowest
  * point touches the floor (so crouches, kneels and lying down need no IK),
  * then lifted by rootY + air.
  */
-export function solvePose(p: Float32Array, out: Float32Array, wx: number, wz: number, facing: number, air: number, frames?: Float32Array): void {
+export function solvePose(p: Float32Array, out: Float32Array, wx: number, wz: number, facing: number, air: number, frames?: Float32Array, d: Readonly<Dims> = DEFAULT_DIMS): void {
   const body = mul(ry(p[P.spin]!), rz(p[P.flip]!));
   const torso = mul(body, mul(ry(p[P.twist]!), mul(rz(-p[P.lean]!), rx(p[P.tilt]!))));
   const hips = mul(body, ry(p[P.twist]! * 0.3));
   const headM = mul(torso, rz(-p[P.head]!));
 
   put(J.pelvis, -1, torso, 0, 0, 0);
-  put(J.chest, -1, torso, 0, SPINE, 0);
-  put(J.neck, -1, torso, 0, SPINE + NECK, 0);
-  put(J.head, J.neck, headM, 0, HEAD_OFF, 0);
-  limb(-1, J.chest, J.lSh, J.lEl, J.lHand, p[P.lShP]!, p[P.lShA]!, p[P.lEl]!, torso, true, SEG.lUpper, SEG.lFore);
-  limb(1, J.chest, J.rSh, J.rEl, J.rHand, p[P.rShP]!, p[P.rShA]!, p[P.rEl]!, torso, true, SEG.rUpper, SEG.rFore);
-  limb(-1, J.pelvis, J.lHip, J.lKn, J.lFoot, p[P.lHipP]!, p[P.lHipA]!, p[P.lKn]!, hips, false, SEG.lThigh, SEG.lShin);
-  limb(1, J.pelvis, J.rHip, J.rKn, J.rFoot, p[P.rHipP]!, p[P.rHipA]!, p[P.rKn]!, hips, false, SEG.rThigh, SEG.rShin);
+  put(J.chest, -1, torso, 0, d.spine, 0);
+  put(J.neck, -1, torso, 0, d.spine + d.neck, 0);
+  put(J.head, J.neck, headM, 0, d.headOff, 0);
+  limb(d, -1, J.chest, J.lSh, J.lEl, J.lHand, p[P.lShP]!, p[P.lShA]!, p[P.lEl]!, torso, true, SEG.lUpper, SEG.lFore);
+  limb(d, 1, J.chest, J.rSh, J.rEl, J.rHand, p[P.rShP]!, p[P.rShA]!, p[P.rEl]!, torso, true, SEG.rUpper, SEG.rFore);
+  limb(d, -1, J.pelvis, J.lHip, J.lKn, J.lFoot, p[P.lHipP]!, p[P.lHipA]!, p[P.lKn]!, hips, false, SEG.lThigh, SEG.lShin);
+  limb(d, 1, J.pelvis, J.rHip, J.rKn, J.rFoot, p[P.rHipP]!, p[P.rHipA]!, p[P.rKn]!, hips, false, SEG.rThigh, SEG.rShin);
   segM[SEG.torso] = torso;
   segM[SEG.head] = headM;
   segM[SEG.hips] = hips;
@@ -143,7 +180,7 @@ export function solvePose(p: Float32Array, out: Float32Array, wx: number, wz: nu
 
   let minY = Infinity;
   for (let j = 0; j < JOINT_COUNT; j++) {
-    const y = L[j * 3 + 1]! - JOINT_CLEARANCE[j]!;
+    const y = L[j * 3 + 1]! - (j === J.head ? d.headR : JOINT_CLEARANCE[j]!);
     if (y < minY) minY = y;
   }
   const yOff = -minY + p[P.rootY]! + air;

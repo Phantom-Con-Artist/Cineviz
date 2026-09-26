@@ -72,3 +72,35 @@ input[type="range"]::-moz-range-thumb {
   box-shadow: 0 0 8px rgba(225, 29, 72, 0.6);
   border: none;
 }
+
+/* Slim sliders for the creative strip and volume: a hairline track, a small quiet thumb */
+input[type="range"].slim {
+  height: 2px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 0;
+  margin: 7px 0 3px;
+}
+
+input[type="range"].slim::-webkit-slider-thumb {
+  width: 9px;
+  height: 9px;
+  background: #e2e8f0;
+  box-shadow: none;
+}
+
+input[type="range"].slim:hover::-webkit-slider-thumb {
+  background: #fb7185;
+  transform: none;
+}
+
+input[type="range"].slim::-moz-range-thumb {
+  width: 9px;
+  height: 9px;
+  background: #e2e8f0;
+  box-shadow: none;
+}
+
+input[type="range"].slim::-moz-range-track {
+  height: 2px;
+  background: rgba(255, 255, 255, 0.1);
+}

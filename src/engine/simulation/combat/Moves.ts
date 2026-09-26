@@ -1,5 +1,5 @@
 import { EASE, wrapAngle } from '../../../utils/math';
-import { J, JOINT_COUNT, makePose, P, PARAM_COUNT, solvePose } from './Skeleton';
+import { DEFAULT_DIMS, Dims, J, JOINT_COUNT, makePose, P, PARAM_COUNT, solvePose } from './Skeleton';
 import { CORE } from './moves/core';
 import { MoveDef, Zone } from './moves/defs';
 import { STYLES } from './moves/styles';
@@ -34,17 +34,19 @@ interface StrikeGeo {
   /** Direction of the forearm (the blade extends along it) */
   dx: number; dy: number; dz: number;
 }
-const geoCache = new WeakMap<MoveDef, Map<Float32Array, StrikeGeo>>();
+const geoCache = new WeakMap<MoveDef, Map<Float32Array, Map<Readonly<Dims>, StrikeGeo>>>();
 const tmpJoints = new Float32Array(JOINT_COUNT * 3);
 
-function geometry(def: MoveDef, base: Float32Array): StrikeGeo {
-  let m = geoCache.get(def);
-  if (!m) geoCache.set(def, (m = new Map()));
-  const hit = m.get(base);
+function geometry(def: MoveDef, base: Float32Array, dims: Readonly<Dims>): StrikeGeo {
+  let byBase = geoCache.get(def);
+  if (!byBase) geoCache.set(def, (byBase = new Map()));
+  let m = byBase.get(base);
+  if (!m) byBase.set(base, (m = new Map()));
+  const hit = m.get(dims);
   if (hit) return hit;
   const key = def.keys.find((k) => Math.abs(k.t - 1) < 1e-6) ?? def.keys[def.keys.length - 1]!;
   const pose = makePose(base, key.p);
-  solvePose(pose, tmpJoints, 0, 0, 0, 0);
+  solvePose(pose, tmpJoints, 0, 0, 0, 0, undefined, dims);
   const limb = def.limb ?? J.rHand;
   const j = (i: number, c: number) => tmpJoints[i * 3 + c]!;
   const elbow = limb === J.lHand ? J.lEl : J.rEl;
@@ -53,7 +55,7 @@ function geometry(def: MoveDef, base: Float32Array): StrikeGeo {
   const l = Math.hypot(dx, dy, dz) || 1;
   dx /= l; dy /= l; dz /= l;
   const g = { x: j(limb, 0), y: j(limb, 1), z: j(limb, 2), dx, dy, dz };
-  m.set(base, g);
+  m.set(dims, g);
   return g;
 }
 
@@ -67,8 +69,8 @@ export interface Reach {
 }
 
 /** How far away the attacker must stand for this move to connect (weaponLen = held weapon, 0 if none) */
-export function reachOf(def: MoveDef, base: Float32Array, weaponLen: number): Reach {
-  const g = geometry(def, base);
+export function reachOf(def: MoveDef, base: Float32Array, weaponLen: number, dims: Readonly<Dims> = DEFAULT_DIMS): Reach {
+  const g = geometry(def, base, dims);
   let x = g.x, y = g.y, z = g.z;
   if (def.weapon && weaponLen > 0) {
     // The blade connects about two thirds of the way out

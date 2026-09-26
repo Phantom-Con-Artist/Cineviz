@@ -46,9 +46,9 @@ export interface RenderBudget {
 }
 
 const TIERS: Omit<RenderBudget, 'tier'>[] = [
-  { body: 2600, clone: 1400, weapon: 900, fx: 16000, sparks: 3500, pet: 1400, morph: 4000, dpr: [1, 1.25] },
-  { body: 3800, clone: 1900, weapon: 1200, fx: 24000, sparks: 5000, pet: 1900, morph: 5500, dpr: [1, 1.5] },
-  { body: 5200, clone: 2600, weapon: 1600, fx: 34000, sparks: 7000, pet: 2600, morph: 7500, dpr: [1, 2] },
+  { body: 3400, clone: 1600, weapon: 900, fx: 16000, sparks: 3500, pet: 1400, morph: 4000, dpr: [1, 1.25] },
+  { body: 4800, clone: 2200, weapon: 1200, fx: 24000, sparks: 5000, pet: 1900, morph: 5500, dpr: [1, 1.5] },
+  { body: 6800, clone: 3000, weapon: 1600, fx: 34000, sparks: 7000, pet: 2600, morph: 7500, dpr: [1, 2] },
 ];
 
 export function detectBudget(): RenderBudget {

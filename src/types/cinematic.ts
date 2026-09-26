@@ -201,7 +201,9 @@ export type CombatEventType =
   | 'ultra_start'
   | 'teleport'
   | 'transform'
-  | 'lock';
+  | 'lock'
+  /** A strike has started its wind-up: `beats` until impact, `intensity` its weight */
+  | 'windup';
 
 export interface CombatEvent {
   type: CombatEventType;

@@ -208,6 +208,17 @@ export const FightScene: React.FC<FightSceneProps> = ({ bridge, cameraMode }) =>
       m.uniforms.uPulse!.value = Math.pow(1 - music.beatPhase, 3) * music.beatStrength * music.intensity;
     }
 
+    bridge.director.aspect = size.width / Math.max(1, size.height);
+    // Post-processing renders in several passes; keep the counters for the whole frame while debugging
+    state.gl.info.autoReset = !bridge.debug;
+    if (bridge.debug) {
+      const r = state.gl.info.render;
+      bridge.renderStats.calls = r.calls;
+      bridge.renderStats.points = r.points;
+      bridge.renderStats.width = state.gl.domElement.width;
+      bridge.renderStats.height = state.gl.domElement.height;
+      state.gl.info.reset();
+    }
     if (cameraMode !== 'orbit_dev') {
       const d = bridge.director;
       const cam = state.camera as THREE.PerspectiveCamera;

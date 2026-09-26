@@ -14,6 +14,12 @@ import { detectBudget, RenderBudget } from '../utils/quality';
 /** What the viewport shows around the fight */
 export type ShowState = 'empty' | 'analyzing' | 'ready' | 'playing' | 'paused' | 'ended';
 
+/** A cinematic moment on the song timeline (impacts, deaths, drops…) */
+export interface TimelineMarker {
+  time: number;
+  label: string;
+}
+
 /**
  * EngineBridge coordinates the high-frequency systems (music analysis, fight
  * choreography, particles, camera) outside of React. The WebGL scene calls
@@ -33,6 +39,13 @@ export class EngineBridge {
   public readonly budget: RenderBudget;
   public palette: MatchPalette;
   public analyzing = false;
+  /** Developer overlays (skeleton, hit volumes, camera rig, stats) */
+  public debug = false;
+  /** Renderer statistics (written by the scene while debugging) */
+  public readonly renderStats = { calls: 0, points: 0, width: 0, height: 0 };
+  /** Cinematic moments of the current show, in song time */
+  public readonly markers: TimelineMarker[] = [];
+  private lastSerial = 0;
 
   private seed = 42819;
   /** Seed of the current show: fresh every time a song starts over, unless the choreography is locked */
@@ -98,7 +111,13 @@ export class EngineBridge {
     this.particles.setPalette(this.palette);
     this.particles.reset();
     this.director.reset();
+    this.markers.length = 0;
     this.ended = false;
+  }
+
+  /** Who is fighting: archetype ids of both fighters */
+  public getMatchup(): [string, string] {
+    return [this.combat.fighters[0].arch.id, this.combat.fighters[1].arch.id];
   }
 
   /** New seed: new fighters, colours and choreography — the show restarts if a song is playing */
@@ -204,6 +223,16 @@ export class EngineBridge {
     // Particles keep drifting a little while paused (frozen time, living air)
     this.particles.update(playing || this.ended ? simDt : dt * 0.04, this.combat, this.music, this.params);
     this.director.update(dt, this.combat, this.music, this.params, playing);
+    if (this.director.eventSerial !== this.lastSerial) {
+      this.lastSerial = this.director.eventSerial;
+      if (playing) {
+        const m = this.markers;
+        // Replace markers that a seek has made stale
+        while (m.length && m[m.length - 1]!.time > this.music.time) m.pop();
+        m.push({ time: this.music.time, label: this.director.getState().event });
+        if (m.length > 400) m.shift();
+      }
+    }
   }
 
   public getMusicState(): Readonly<MusicState> {
@@ -244,5 +273,6 @@ function normalize(p: CreativeParameters): NormalizedParams {
     sadness: p.sadness / 100,
     chaos: p.chaos / 100,
     aura: p.aura / 100,
+    drama: (p.drama ?? 60) / 100,
   };
 }
