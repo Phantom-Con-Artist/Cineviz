@@ -11,7 +11,20 @@ import type { Element } from './Moves';
  */
 export type FxKind =
   | 'orb' | 'wave' | 'beam' | 'rain' | 'armament' | 'lightning' | 'stretch'
-  | 'petals' | 'pillar' | 'shock' | 'flurry' | 'coffin' | 'bloom' | 'chains';
+  | 'petals' | 'pillar' | 'shock' | 'flurry' | 'coffin' | 'bloom' | 'chains'
+  // supermoves / ultramoves
+  | 'storm'     // arena-scale rotating cloud field, rain, wind, debris (lightning is drawn by the bolt system)
+  | 'tornado'   // a rotating energy column that travels
+  | 'vortex'    // a dark singularity pulling everything in
+  | 'judgment'  // a beam from the sky with concentric rings
+  | 'slash'     // a gigantic crescent crossing the arena
+  | 'star'      // star-like energy bodies overhead that descend one by one (times[], pts[])
+  | 'meteor'    // glowing projectiles raining from the sky (times[], pts[])
+  | 'eyebeam'   // two beams from the eyes
+  | 'gravity'   // a gravity well compressing everything under it
+  | 'sun'       // a miniature star
+  | 'cuts'      // cutting trails hanging in the air (pts[] → pts2[]), detonating at `a`
+  | 'quake';    // secondary shockwave rings racing outwards (times[])
 
 /** Something with a position and joints (fighters, clones) */
 export interface FxAnchor {
@@ -22,7 +35,7 @@ export interface FxAnchor {
   team: number;
 }
 
-export const MAX_ITEMS = 96;
+export const MAX_ITEMS = 160;
 const HIST = 48;
 
 export class TechFx {
@@ -79,6 +92,9 @@ export class TechFx {
   readonly times = new Float32Array(MAX_ITEMS);
   /** Renderer bookkeeping per item */
   readonly flags = new Uint8Array(MAX_ITEMS);
+  /** Per item points (landing spots, cut starts) and second points (cut ends) */
+  readonly pts = new Float32Array(MAX_ITEMS * 3);
+  readonly pts2 = new Float32Array(MAX_ITEMS * 3);
   /** Recent positions (serpent trails), newest first */
   readonly hist = new Float32Array(HIST * 3);
   histN = 0;

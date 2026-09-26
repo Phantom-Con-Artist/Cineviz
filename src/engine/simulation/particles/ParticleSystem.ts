@@ -1,11 +1,15 @@
 import { CombatEvent } from '../../../types/cinematic';
 import { MusicState } from '../../../types/music';
-import { RenderBudget } from '../../../utils/quality';
-import { clamp, damp } from '../../../utils/math';
+import { FX_QUALITY, FxLevel, FxQuality, RenderBudget } from '../../../utils/quality';
+import { clamp, damp, smoothstep } from '../../../utils/math';
 import { MatchPalette, FighterPalette } from '../../rendering/palettes';
 import { Actor, CombatEngine, Fighter, NormalizedParams } from '../combat/CombatEngine';
 import { J } from '../combat/Skeleton';
 import { BodyCloud } from './BodyCloud';
+import { ArmoryCloud } from './ArmoryCloud';
+import { DragonCloud } from './DragonCloud';
+import { Lightning } from './Lightning';
+import { ARM_KINDS } from '../combat/powers/Armory';
 import { elemCols, FxPool, GOLD, Out, R, RGB, rgb, TeamColors, tinted, unit, WHITE } from './common';
 import { TechRenderer } from './TechRenderer';
 import { MorphCloud } from './MorphCloud';
@@ -26,7 +30,7 @@ const buildId = (o: object) => {
 
 /**
  * Every glowing point in the show lives in one set of buffers, laid out as
- *   [fighter 0 | fighter 1 | 4 clones | 2 weapons | 2 pets | summon morph | free FX | streak sparks]
+ *   [fighter 0 | fighter 1 | 4 clones | 6 team-mates | 2 weapons | 2 pets | summon morph | dragons | free FX | streak sparks]
  * Each cloud writes its own slice every frame; this class routes combat events
  * to the right bursts and runs the continuous emitters (aura, charge, beams,
  * fire breath, afterimages, trails, rain…).
@@ -54,6 +58,10 @@ export class ParticleSystem {
   private readonly weapons: WeaponCloud[];
   private readonly petClouds: PetCloud[];
   private readonly morph: MorphCloud;
+  private readonly dragon: DragonCloud;
+  /** Manifested weapons (arsenals, rains, barrages) */
+  readonly arms: ArmoryCloud;
+  readonly lightning: Lightning;
   readonly fx: FxPool;
   readonly sparks: FxPool;
   private readonly tech: TechRenderer;
@@ -61,7 +69,18 @@ export class ParticleSystem {
   private cols: [TeamColors, TeamColors];
   private rippleIdx = 0;
   private time = 0;
-  private afterTimer = new Float32Array(6);
+  private afterTimer = new Float32Array(12);
+  /** Last joint positions per body slot (limb afterimages) */
+  private readonly lastJ: Float32Array[] = Array.from({ length: 12 }, () => new Float32Array(16 * 3));
+  private readonly hasLastJ = new Uint8Array(12);
+  private hiddenPrev = [false, false];
+  private readonly prevRoar = [0, 0, 0];
+  /** A strong pull towards a point until `until` (the held breath before an ultramove lands) */
+  private pull = { x: 0, y: 0, z: 0, until: -1 };
+  /** Effect quality (the viewer's choice) */
+  quality: FxQuality = FX_QUALITY.HIGH;
+  /** Camera position (closer bodies get denser afterimages) */
+  readonly cam = [0, 4, 16];
   private auraPulse = 0;
   private readonly tmp = [0, 0, 0, 0, 0, 0];
 
@@ -80,6 +99,9 @@ export class ParticleSystem {
     this.weapons = [new WeaponCloud(budget.weapon, take(budget.weapon)), new WeaponCloud(budget.weapon, take(budget.weapon))];
     this.petClouds = [new PetCloud(budget.pet, take(budget.pet)), new PetCloud(budget.pet, take(budget.pet))];
     this.morph = new MorphCloud(budget.morph, take(budget.morph));
+    this.dragon = new DragonCloud(budget.dragon, take(budget.dragon));
+    this.arms = new ArmoryCloud(budget.arms, take(budget.arms));
+    this.lightning = new Lightning(budget.bolts);
     this.fx = new FxPool(budget.fx, take(budget.fx));
     this.sparks = new FxPool(budget.sparks, take(budget.sparks));
     this.count = off;
@@ -117,6 +139,39 @@ export class ParticleSystem {
     this.teamAura[1] = this.cols[1].aura;
   }
 
+  get teamColors(): readonly TeamColors[] {
+    return this.cols;
+  }
+
+  setFxLevel(level: FxLevel): void {
+    this.quality = FX_QUALITY[level];
+    this.lightning.depth = this.quality.lightning;
+  }
+
+  /** How much of an actor's face the camera sees: the eyes fade as the head turns away */
+  private eyesFor(a: Actor): number {
+    const h = J.head * 3;
+    const tx = this.cam[0]! - a.joints[h]!, tz = this.cam[2]! - a.joints[h + 2]!;
+    const l = Math.hypot(tx, tz) || 1;
+    const d = (Math.cos(a.facing) * tx + Math.sin(a.facing) * tz) / l;
+    return smoothstep(-0.05, 0.35, d);
+  }
+
+  /** The particle body an event lands on */
+  private bodyOf(e: CombatEvent): BodyCloud {
+    return this.bodies[e.target] ?? this.bodies[0]!;
+  }
+
+  // ---- extra kit for the power renderer
+  bolt(a: readonly number[], b: readonly number[], c: RGB, life = 0.3, jag = 0.18): void {
+    this.lightning.strike(a, b, c, life, jag);
+  }
+
+  attract(x: number, y: number, z: number, r: number, k: number): void {
+    this.fx.force(x, y, z, r, k);
+    this.sparks.force(x, y, z, r, k);
+  }
+
   /** Empty the arena (new track / stop) */
   reset(): void {
     for (const b of this.bodies) {
@@ -145,7 +200,7 @@ export class ParticleSystem {
 
   // ------------------------------------------------------------------ emitters
   n(count: number): number {
-    return Math.max(1, Math.round(count * (0.5 + this.q * 0.5)));
+    return Math.max(1, Math.round(count * (0.5 + this.q * 0.5) * this.quality.particles));
   }
 
   sparkBurst(p: number[], d: number[], count: number, speed: number, spread: number, c1: RGB, c2: RGB, life = 0.45, size = 1.3): void {
@@ -286,7 +341,8 @@ export class ParticleSystem {
         this.sparkBurst(p, d, (crit ? 150 : 60) * epic, crit ? 16 : 10, 0.9 * chaos, A.hot, A.aura);
         this.ring(p, d[0], d[1], d[2], (crit ? 200 : 80) * epic, crit ? 7 : 4.5, A.aura, 0.45, 1.8);
         this.flare(p, crit ? 5 : 2, A.hot, crit ? 34 : 20);
-        this.bodies[e.target]!.wound(p[0], p[1], p[2], d[0], d[1] + 0.2, d[2], crit ? 0.7 : 0.42, crit ? 12 : 6);
+        this.fx.impulse(p[0], p[1], p[2], crit ? 3.5 : 1.6, crit ? 9 : 4);
+        this.bodyOf(e).wound(p[0], p[1], p[2], d[0], d[1] + 0.2, d[2], crit ? 0.7 : 0.42, crit ? 12 : 6);
         if (crit) {
           this.ring([p[0], 0.08, p[2]], 0, 1, 0, 220 * epic, 9, D.aura, 0.7, 1.6);
           this.sphere(p, 160 * epic, 6, A.hot, D.aura, 0.8, 1.6);
@@ -299,7 +355,7 @@ export class ParticleSystem {
       case 'pet_hit': {
         this.sparkBurst(p, d, 70 * epic, 9, 0.9, A.hot, A.aura);
         this.ring(p, d[0], d[1], d[2], 70, 4, A.aura, 0.4, 1.5);
-        this.bodies[e.target]!.wound(p[0], p[1], p[2], d[0], 0.3, d[2], 0.5, 6);
+        this.bodyOf(e).wound(p[0], p[1], p[2], d[0], 0.3, d[2], 0.5, 6);
         break;
       }
       case 'block': {
@@ -308,7 +364,7 @@ export class ParticleSystem {
         this.sparkBurst(p, [-d[0], 0.5, -d[2]], (armed ? 110 : 55) * epic, armed ? 14 : 8, 1.2, c1, A.aura, 0.4, 1.1);
         this.ring(p, d[0], d[1], d[2], armed ? 70 : 40, 3.5, D.aura, 0.3, 1.3, true);
         this.flare(p, armed ? 3 : 1, c1, armed ? 28 : 18);
-        this.bodies[e.target]!.wound(p[0], p[1], p[2], d[0], 0.3, d[2], 0.25, 3);
+        this.bodyOf(e).wound(p[0], p[1], p[2], d[0], 0.3, d[2], 0.25, 3);
         break;
       }
       case 'dodge':
@@ -323,6 +379,7 @@ export class ParticleSystem {
           break;
         }
         this.sphere(p, 380 * epic, 12, A.hot, D.hot, 0.9, 2);
+        this.fx.impulse(p[0], p[1], p[2], 6, 14);
         this.sparkBurst(p, [0, 0.4, 0], 200 * epic, 18, 1.5 * chaos, A.aura, D.aura, 0.6, 1.4);
         this.ring(p, d[0], d[1], d[2], 260 * epic, 10, A.aura, 0.8, 2.2);
         this.ring(p, d[0], d[1], d[2], 200 * epic, 6, D.aura, 0.9, 1.6);
@@ -335,9 +392,8 @@ export class ParticleSystem {
         break;
       }
       case 'dash': {
-        const f = eng.fighters[e.fighter]!;
-        this.dust(f.x, f.z, 25, 2.5);
-        this.ring([f.x, 0.1, f.z], 0, 1, 0, 60, 3, A.aura, 0.4, 1.2, true);
+        this.dust(p[0], p[2], 25, 2.5);
+        this.ring([p[0], 0.1, p[2]], 0, 1, 0, 60, 3, A.aura, 0.4, 1.2, true);
         break;
       }
       case 'weapon_form': {
@@ -385,7 +441,7 @@ export class ParticleSystem {
         this.flare(p, big ? 6 : 2, A.hot, big ? 56 : 26);
         if (big) {
           this.debris(p[0], p[2], 90, 6, [0.5, 0.45, 0.6]);
-          this.bodies[e.target]!.wound(p[0], p[1], p[2], d[0], 0.5, d[2], 0.9, 11);
+          this.bodyOf(e).wound(p[0], p[1], p[2], d[0], 0.5, d[2], 0.9, 11);
         }
         if (p[1] < 1.2 || big) this.addRipple(p[0], p[2], big ? 1.3 : 0.5);
         if (p[1] < 0.3) this.debris(p[0], p[2], 30, 4, [0.5, 0.45, 0.6]);
@@ -416,7 +472,7 @@ export class ParticleSystem {
         this.debris(p[0], p[2], 180 * epic, 9, [0.55, 0.5, 0.65]);
         this.dust(p[0], p[2], 60, 5);
         this.addRipple(p[0], p[2], 2);
-        this.bodies[e.target]!.wound(p[0], p[1], p[2], d[0], 0.4, d[2], 1.4, 14);
+        this.bodyOf(e).wound(p[0], p[1], p[2], d[0], 0.4, d[2], 1.4, 14);
         break;
       case 'launch':
         this.sparkBurst(p, [0, 1, 0], 90 * epic, 12, 0.35, A.hot, A.aura, 0.6, 1.2);
@@ -424,6 +480,7 @@ export class ParticleSystem {
         this.dust(p[0], p[2], 20, 3);
         break;
       case 'slam':
+        this.fx.impulse(p[0], 0.3, p[2], 7, 12);
         this.ring([p[0], 0.08, p[2]], 0, 1, 0, 420 * epic, 13, A.aura, 0.9, 2, true);
         this.ring([p[0], 0.3, p[2]], 0, 1, 0, 220, 7, WHITE, 0.6, 1.8);
         this.debris(p[0], p[2], 260 * epic, 9, [0.55, 0.5, 0.65]);
@@ -504,7 +561,7 @@ export class ParticleSystem {
         this.morph.explode(p[0], p[1], p[2], d[0], d[2], false);
         const big = sm.kind === 'building' || sm.kind === 'meteor' || sm.kind === 'plane' || sm.kind === 'torii' || sm.anchored;
         this.blast(p, d, A, D, epic, big ? 1.25 : 1);
-        if (e.critical) this.bodies[e.target]!.wound(p[0], p[1], p[2], d[0], 0.5, d[2], 1.1, 13);
+        if (e.critical) this.bodyOf(e).wound(p[0], p[1], p[2], d[0], 0.5, d[2], 1.1, 13);
         break;
       }
       case 'summon_split':
@@ -515,9 +572,9 @@ export class ParticleSystem {
         break;
 
       // ---------------------------------------------------------------- techniques
-      case 'tech_charge':
-      case 'ultra_start': {
-        const ult = e.type === 'ultra_start';
+      case 'super_started':
+      case 'ultra_started': {
+        const ult = e.type === 'ultra_started';
         const [c1, c2] = elemCols(e.sub, base);
         this.flare(p, 2, c1, ult ? 50 : 34, 0.16);
         this.ring([p[0], 0.08, p[2]], 0, 1, 0, ult ? 360 : 150, ult ? 12 : 6, c1, 0.9, 1.7, true);
@@ -532,6 +589,120 @@ export class ParticleSystem {
           this.debris(f.x, f.z, 140, 7, [0.6, 0.5, 0.55]);
           this.addRipple(f.x, f.z, 1.8);
         }
+        break;
+      }
+      // ---------------------------------------------------------------- supermoves / ultramoves
+      case 'super_charge':
+        this.ring(p, 0, 1, 0, 90, -3, A.aura, 0.5, 1.4);
+        this.flare(p, 1, A.hot, 30, 0.12);
+        break;
+      case 'super_released':
+        this.flare(p, 2, A.hot, 44, 0.14);
+        this.fx.impulse(p[0], p[1], p[2], 3, 8);
+        break;
+      case 'super_impact':
+      case 'ultra_impact': {
+        const ult = e.type === 'ultra_impact';
+        const r = e.radius ?? 4;
+        const [c1, c2] = elemCols(e.sub, base);
+        const k = ult ? Math.min(2.2, 0.9 + r * 0.08) : 1;
+        this.sphere(p, 520 * k * epic, 14 * k, c2, c1, 1.2, 2.3);
+        this.sparkBurst(p, [0, 0.6, 0], 260 * k * epic, 20 * k, 1.4, c2, c1, 0.9, 1.5);
+        this.ring([p[0], 0.08, p[2]], 0, 1, 0, 420 * k, 13 * k + r * 0.6, c1, 1.1, 2.2, true);
+        if (ult) {
+          this.ring([p[0], 0.3, p[2]], 0, 1, 0, 320, 22 + r, WHITE, 1.3, 2, true);
+          this.ring(p, 0, 1, 0, 260, 9, c2, 1, 2);
+          this.ring([p[0], 0.1, p[2]], 0, 1, 0, 260, 34 + r, c2, 1.6, 2.4, true);
+        }
+        this.flare(p, ult ? 14 : 6, WHITE, ult ? 140 : 70, 0.25);
+        this.debris(p[0], p[2], 220 * k * this.quality.debris, 10 * k, [0.55, 0.5, 0.65]);
+        this.dust(p[0], p[2], 120 * k, 7 * k);
+        this.addRipple(p[0], p[2], 2.2 * k);
+        this.fx.impulse(p[0], p[1], p[2], r * 1.6, 16 * k);
+        this.sparks.impulse(p[0], p[1], p[2], r * 1.6, 16 * k);
+        this.bodyOf(e).wound(p[0], p[1], p[2], d[0], 0.5, d[2], 1.3, 14);
+        break;
+      }
+      case 'ultra_formation': {
+        // Power rises in a spiral round the caster
+        const [c1, c2] = elemCols(e.sub, base);
+        const f = eng.fighters[e.fighter]!;
+        for (let i = 0, n = this.n(500); i < n; i++) {
+          const a = R() * Math.PI * 2;
+          const r = 0.8 + R() * 3;
+          const s = 3 + R() * 5;
+          this.sparks.emit(f.x + Math.cos(a) * r, R() * 0.5, f.z + Math.sin(a) * r, -Math.sin(a) * s, 6 + R() * 12, Math.cos(a) * s, 0.8 + R() * 0.8, R() < 0.5 ? c2 : c1, 1 + R(), 0.8, -1, 0, 1.6);
+        }
+        this.ring([f.x, 0.1, f.z], 0, 1, 0, 300, -8, c1, 1.2, 1.8, true);
+        break;
+      }
+      case 'ultra_peak': {
+        // The held breath: everything nearby is drawn towards the point about to be struck
+        const [c1, c2] = elemCols(e.sub, base);
+        for (let i = 0, n = this.n(500); i < n; i++) {
+          unit(U);
+          const r = 4 + R() * 10;
+          const life = 0.5 + R() * 0.4;
+          this.sparks.emit(p[0] + U[0]! * r, Math.max(0.1, p[1] + U[1]! * r * 0.5), p[2] + U[2]! * r, (-U[0]! * r) / life, (-U[1]! * r * 0.5) / life, (-U[2]! * r) / life, life, R() < 0.5 ? c1 : c2, 1 + R(), 0, 0, 0, 1.5);
+        }
+        this.pull = { x: p[0], y: p[1], z: p[2], until: this.time + 0.9 };
+        break;
+      }
+      case 'ultra_aftermath': {
+        // Embers drifting up over the devastation
+        const [c1, c2] = elemCols(e.sub, base);
+        const r = e.radius ?? 8;
+        for (let i = 0, n = this.n(360); i < n; i++) {
+          const a = R() * Math.PI * 2, rr = Math.sqrt(R()) * r;
+          this.fx.emit(p[0] + Math.cos(a) * rr, R() * 0.6, p[2] + Math.sin(a) * rr, (R() - 0.5) * 0.4, 0.5 + R() * 1.2, (R() - 0.5) * 0.4, 2.5 + R() * 2.5, R() < 0.5 ? c1 : c2, 1 + R() * 1.2, 0.3, -0.2, 0, 1.2);
+        }
+        this.dust(p[0], p[2], 80, 3);
+        break;
+      }
+      // ---------------------------------------------------------------- weapon ↔ hands
+      case 'weapon_release':
+        this.sparkBurst(p, d, 40, 6, 0.5, A.hot, A.aura, 0.4, 1.1);
+        break;
+      case 'weapon_recall':
+        if (e.critical) {
+          this.flare(p, 2, A.hot, 36);
+          this.ring(p, 0, 1, 0, 60, 3, A.aura, 0.3, 1.2);
+        } else this.sparkBurst(p, d, 30, 5, 0.4, A.hot, A.aura, 0.3, 1);
+        break;
+      case 'weapon_manifest': {
+        const [c1, c2] = elemCols(e.sub, base);
+        for (let i = 0, n = this.n(160); i < n; i++) {
+          unit(U);
+          const r = 0.8 + R() * 1.2;
+          const life = 0.25 + R() * 0.2;
+          this.sparks.emit(p[0] + U[0]! * r, p[1] + U[1]! * r, p[2] + U[2]! * r, (-U[0]! * r) / life, (-U[1]! * r) / life, (-U[2]! * r) / life, life, R() < 0.5 ? c1 : c2, 1.1, 0, 0, 0, 1.6);
+        }
+        this.flare(p, 3, c2, 48, 0.16);
+        break;
+      }
+      // ---------------------------------------------------------------- speed
+      case 'speed_dash':
+        this.ring(p, d[0] || 1, 0.15, d[2], 90, 7, WHITE, 0.3, 1.4, true);
+        this.dust(p[0], p[2], 20, 3);
+        this.fx.impulse(p[0], p[1], p[2], 3, 9);
+        break;
+      case 'velocity_break': {
+        // A sonic boom: the air breaks in a ring round the fighter
+        this.ring(p, 0, 1, 0, 420, 18, WHITE, 0.6, 2, true);
+        this.ring(p, d[0] || 1, 0, d[2], 260, 12, A.aura, 0.6, 1.8);
+        this.ring([p[0], 0.08, p[2]], 0, 1, 0, 320, 14, A.aura, 0.8, 2, true);
+        this.flare(p, 6, WHITE, 70, 0.16);
+        this.dust(p[0], p[2], 90, 7);
+        this.debris(p[0], p[2], 60 * this.quality.debris, 6, [0.55, 0.5, 0.65]);
+        this.addRipple(p[0], p[2], 1.6);
+        this.fx.impulse(p[0], p[1], p[2], 9, 18);
+        this.sparks.impulse(p[0], p[1], p[2], 9, 18);
+        break;
+      }
+      case 'perfect_dodge': {
+        const b = this.bodies[e.fighter]!;
+        for (let k = 0; k < 3; k++) this.ghost(b, this.quality.ghostStride, 0.45 + k * 0.15, k % 2 ? WHITE : this.cols[e.fighter]!.aura, 0.9);
+        this.ring(p, 0, 1, 0, 90, 4, WHITE, 0.4, 1.3);
         break;
       }
       case 'tech_release': {
@@ -550,7 +721,7 @@ export class ParticleSystem {
           this.ring(p, d[0], d[1], d[2], 70, 5, A.aura, 0.4, 1.5);
           this.flare(p, 2, A.hot, 30);
         }
-        this.bodies[e.target]!.wound(p[0], p[1], p[2], d[0], 0.4, d[2], big ? 1.2 : 0.5, big ? 13 : 6);
+        this.bodyOf(e).wound(p[0], p[1], p[2], d[0], 0.4, d[2], big ? 1.2 : 0.5, big ? 13 : 6);
         break;
       }
       case 'teleport': {
@@ -610,7 +781,14 @@ export class ParticleSystem {
       const body = this.bodies[k]!;
       const c = this.cols[k]!;
       this.syncSkin(body, f);
-      body.visTarget = f.present ? 1 : 0;
+      body.visTarget = f.present && !f.hidden ? 1 : 0;
+      if (f.hidden && !this.hiddenPrev[k]) {
+        // The body comes apart (shapeshift): every point flung outwards
+        const j = f.joints;
+        this.cloudBurst(body, j[J.chest * 3]!, j[J.chest * 3 + 1]!, j[J.chest * 3 + 2]!, 9, c.aura);
+        this.sphere([j[J.chest * 3]!, j[J.chest * 3 + 1]!, j[J.chest * 3 + 2]!], 300, 9, c.hot, c.aura, 1, 2);
+      }
+      this.hiddenPrev[k] = f.hidden;
       if (!f.present && body.vis < 0.01 && !body.dissolving) {
         body.hide(o);
         this.weapons[k]!.update(dt, t, f, c, o);
@@ -624,15 +802,23 @@ export class ParticleSystem {
         erosion: f.dead ? 0 : clamp((100 - f.health) / 100) * 0.42,
         alpha: 1,
         colors: c,
+        eyes: this.eyesFor(f),
       }, o);
       const w = this.weapons[k]!;
       if (f.weaponOn) w.setType(f.weapon);
-      w.update(dt, t, f, c, o);
-      if (!f.dead && f.present) {
+      w.update(dt, t, f, c, o, eng.beat);
+      if (!f.dead && f.present && !f.hidden) {
         this.emitAura(f, body, c, aura, dt);
         this.emitCharge(f, c, dt);
-        this.afterimages(f, body, c, k, dt);
+        this.afterimages(f, body, c, k, dt, f.auraBoost * 0.5 + f.superMode * 0.5 + (f.form ? 0.5 : 0));
         this.slashTrail(f, w, c, eng.beat);
+        // Moving fast, the body parts the particles around it
+        if (f.speed > 3) this.fx.force(f.x, 1, f.z, 1.8, -24 * Math.min(2, f.speed / 8));
+        // Speed with lightning in the aura crackles along the path
+        if ((f.form === 'lightning' || f.bladeElement === 'lightning') && f.speed > 7 && R() < 0.7) {
+          const lj = this.lastJ[k]!;
+          if (this.hasLastJ[k]) this.bolt([lj[J.chest * 3]!, lj[J.chest * 3 + 1]!, lj[J.chest * 3 + 2]!], [f.joints[J.chest * 3]!, f.joints[J.chest * 3 + 1]!, f.joints[J.chest * 3 + 2]!], R() < 0.5 ? [0.7, 0.9, 2] : WHITE, 0.25, 0.3);
+        }
       }
     });
 
@@ -644,9 +830,11 @@ export class ParticleSystem {
       }
       const c = this.cols[cl.owner]!;
       this.syncSkin(body, cl);
-      body.update(dt, t, cl.frames, { flash: cl.hitFlash, superMode: 0, aura: 0.4, erosion: 0, alpha: 0.8, colors: c }, o);
-      this.emitAura(cl, body, c, 0.35, dt);
-      this.afterimages(cl, body, c, 2 + i, dt);
+      // Speed phantoms are afterimages that fight: see-through, tinted, trailing ghosts
+      const ph = cl.phantom;
+      body.update(dt, t, cl.frames, { flash: cl.hitFlash, superMode: 0, aura: ph ? 0.8 : 0.4, erosion: 0, alpha: ph ? 0.5 : 0.8, colors: c, eyes: this.eyesFor(cl) }, o);
+      this.emitAura(cl, body, c, ph ? 0.5 : 0.35, dt);
+      this.afterimages(cl, body, c, 2 + i, dt, ph ? 1 : 0);
     });
 
     eng.pets.forEach((p, i) => {
@@ -677,6 +865,17 @@ export class ParticleSystem {
     this.emitProjectiles(eng);
     this.emitBeams(eng, t);
     this.tech.update(dt, eng, this.cols);
+    this.arms.update(t, eng.armory, this.cols, this.quality.arsenal, o);
+    this.emitArmory(eng);
+    this.dragon.use = this.quality.dragon;
+    this.dragon.update(dt, t, eng.dragons, this.cols, o);
+    this.emitDragons(eng);
+    if (this.pull.until > t) {
+      this.fx.force(this.pull.x, this.pull.y, this.pull.z, 16, 30);
+      this.sparks.force(this.pull.x, this.pull.y, this.pull.z, 16, 30);
+    }
+    this.lightning.update(dt, t);
+    if (this.lightning.flash > 0.05) eng.arena.light(this.lightning.flash * 0.8);
     if (eng.lock.active) {
       // Sparks pouring off two weapons grinding against each other
       const lp = [eng.lock.x, eng.lock.y, eng.lock.z];
@@ -755,13 +954,137 @@ export class ParticleSystem {
     }
   }
 
-  private afterimages(a: Actor, body: BodyCloud, c: TeamColors, slot: number, dt: number): void {
-    if (a.dashing <= 0 && a.speed < 4.5) return;
-    this.afterTimer[slot] += dt;
-    if (this.afterTimer[slot] < 0.045) return;
-    this.afterTimer[slot] = 0;
-    this.ghost(body, 3, 0.3, c.aura, 0.6);
+  /**
+   * Afterimages, graded by speed (and by power, camera proximity and the FX quality):
+   * slow → none; fast → a faint ghost now and then; very fast → a string of ghosts;
+   * extreme (dashes, flash steps) → a persistent trail. Fast limbs (a punch, a kick) leave
+   * short streaks of their own. Ghosts are free particles, so they fade out smoothly.
+   */
+  private afterimages(a: Actor, body: BodyCloud, c: TeamColors, slot: number, dt: number, power: number): void {
+    const Q = this.quality;
+    const j = a.joints;
+    const lj = this.lastJ[slot]!;
+    const sp = a.speed + (a.dashing > 0 ? 7 : 0);
+    const cx = j[J.chest * 3]!, cy = j[J.chest * 3 + 1]!, cz = j[J.chest * 3 + 2]!;
+    const cd = Math.hypot(cx - this.cam[0]!, cy - this.cam[1]!, cz - this.cam[2]!);
+    const near = clamp(1.6 - cd / 14, 0.45, 1.3);
+    if (sp > 4.5) {
+      const tier = sp < 9 ? 1 : sp < 20 ? 2 : 3;
+      const interval = (tier === 1 ? 0.1 : tier === 2 ? 0.04 : 0.018) * (6 / Math.max(2, Q.afterimages));
+      this.afterTimer[slot] += dt;
+      if (this.afterTimer[slot] >= interval) {
+        this.afterTimer[slot] = 0;
+        const stride = Math.max(1, Math.round((Q.ghostStride * (tier === 3 ? 3 : tier === 2 ? 2 : 2.5)) / near));
+        const life = (tier === 1 ? 0.2 : tier === 2 ? 0.3 : 0.42) * Q.trail * (0.85 + power * 0.3);
+        this.ghost(body, stride, life, tier === 3 ? c.hot : c.aura, tier === 1 ? 0.5 : 0.7);
+      }
+    }
+    // Limb streaks
+    if (this.hasLastJ[slot] && dt > 0) {
+      for (const jj of [J.lHand, J.rHand, J.lFoot, J.rFoot]) {
+        const k = jj * 3;
+        const dx = j[k]! - lj[k]!, dy = j[k + 1]! - lj[k + 1]!, dz = j[k + 2]! - lj[k + 2]!;
+        const v = Math.hypot(dx, dy, dz) / dt;
+        if (v < 8 || v > 80) continue;
+        const n = Math.min(6, Math.round((v / 6) * Q.emission));
+        for (let i = 0; i < n; i++) {
+          const u = R();
+          this.fx.emit(lj[k]! + dx * u, lj[k + 1]! + dy * u, lj[k + 2]! + dz * u, 0, 0, 0, 0.12 * Q.trail, i % 2 ? c.hot : c.aura, 1.1, 0, 0, 0, 1.3);
+        }
+      }
+    }
+    lj.set(j);
+    this.hasLastJ[slot] = 1;
   }
+
+  /** Manifested weapons: formation sparks, launch flashes, impact bursts */
+  private emitArmory(eng: CombatEngine): void {
+    const arm = eng.armory;
+    const cap = this.quality.arsenal;
+    let sparkle = 0;
+    let drawn = 0;
+    for (const it of arm.items) {
+      if (!it.active || it.state === 'off') continue;
+      if (++drawn > cap) break;
+      if (it.state === 'form' && sparkle < 60) {
+        // Particles converge on the forming blade, along its length
+        sparkle++;
+        const [c1, c2] = elemCols(it.element, this.cols[it.owner]!);
+        unit(U);
+        const L = 0.6 * it.scale;
+        const u = R();
+        const tx = it.x - it.dx * L * u, ty = it.y - it.dy * L * u, tz = it.z - it.dz * L * u;
+        const r = 0.5 + R() * 0.8 * it.scale;
+        const life = 0.25;
+        this.sparks.emit(tx + U[0]! * r, ty + U[1]! * r, tz + U[2]! * r, (-U[0]! * r) / life, (-U[1]! * r) / life, (-U[2]! * r) / life, life, R() < 0.5 ? c1 : c2, 1, 0, 0, 0, 1.5);
+      } else if (it.state === 'flight' && R() < 0.5) {
+        const [c1] = elemCols(it.element, this.cols[it.owner]!);
+        this.sparks.emit(it.x, it.y, it.z, -it.dx * 4, -it.dy * 4, -it.dz * 4, 0.2 * this.quality.trail, c1, 1, 1, 0, 0, 1.3);
+      }
+    }
+    for (let i = 0; i < arm.launchCount; i++) {
+      const q = i * 4;
+      const c = this.cols[arm.launches[q + 3]!] ?? this.cols[0]!;
+      this.flare([arm.launches[q]!, arm.launches[q + 1]!, arm.launches[q + 2]!], 1, c.hot, 22, 0.08);
+    }
+    const bursts = Math.min(arm.impactCount, Math.ceil(cap / 8));
+    for (let i = 0; i < bursts; i++) {
+      const q = i * 9;
+      const x = arm.impacts[q]!, y = arm.impacts[q + 1]!, z = arm.impacts[q + 2]!;
+      const sc = arm.impacts[q + 6]!;
+      const kind = ARM_KINDS[arm.impacts[q + 8]!]!;
+      const [c1, c2] = elemCols(arm.impactEl[i], this.cols[arm.impacts[q + 7]!] ?? this.cols[0]!);
+      const up = arm.impacts[q + 4]! > 0.7;
+      if (sc > 3) {
+        // A colossal weapon landing
+        this.sphere([x, 0.5, z], 700, 16, c2, c1, 1.3, 2.4);
+        this.ring([x, 0.08, z], 0, 1, 0, 500, 20, c1, 1.2, 2.4, true);
+        this.ring([x, 0.4, z], 0, 1, 0, 300, 12, WHITE, 1, 2);
+        this.debris(x, z, 260 * this.quality.debris, 11, [0.55, 0.5, 0.65]);
+        this.dust(x, z, 160, 8);
+        this.flare([x, 1, z], 10, WHITE, 140, 0.25);
+        this.addRipple(x, z, 2.5);
+        this.fx.impulse(x, 1, z, 14, 20);
+      } else if (up || y < 0.9) {
+        // Erupting from, or driven into, the floor
+        this.ring([x, 0.08, z], 0, 1, 0, 50, 5 * sc, c1, 0.5, 1.5, true);
+        this.sparkBurst([x, 0.15, z], [0, 1, 0], 30, 8, 0.7, c2, c1, 0.45, 1.2);
+        this.debris(x, z, 14 * this.quality.debris * sc, 5, [0.55, 0.5, 0.65]);
+        if (up) this.dust(x, z, 12, 3);
+        this.addRipple(x, z, 0.25 * sc);
+      } else {
+        this.sparkBurst([x, y, z], [-arm.impacts[q + 3]!, 0.4, -arm.impacts[q + 5]!], kind === 'arrow' || kind === 'knife' ? 18 : 34, 9, 1, c2, c1, 0.4, 1.2);
+        this.flare([x, y, z], 1, c2, 24, 0.1);
+        this.fx.impulse(x, y, z, 1.5, 5);
+      }
+    }
+  }
+
+  /** Dragons: embers shed along the body, a shockwave when one roars */
+  private emitDragons(eng: CombatEngine): void {
+    eng.dragons.forEach((d, i) => {
+      if (!d.active || d.vis < 0.2) {
+        this.prevRoar[i] = 0;
+        return;
+      }
+      const [c1, c2] = elemCols(d.element, this.cols[d.owner]!);
+      for (let k = 0; k < Math.ceil(4 * this.quality.emission); k++) {
+        const n = Math.floor(R() * 60) * 3;
+        this.fx.emit(d.spine[n]!, d.spine[n + 1]!, d.spine[n + 2]!, (R() - 0.5) * 0.6, -0.2 - R() * 0.6, (R() - 0.5) * 0.6, 0.8 + R() * 0.6, R() < 0.5 ? c1 : c2, 1.2 + R(), 0.6, 0.8, 0, 1.4);
+      }
+      if (d.roar > 0.95 && this.prevRoar[i]! <= 0.95) {
+        const h = [d.spine[0]!, d.spine[1]!, d.spine[2]!];
+        this.ring(h, 0, 1, 0, 400, 16, WHITE, 0.8, 2, true);
+        this.ring(h, d.hx || 1, d.hy, d.hz, 300, 12, c2, 0.8, 2);
+        this.flare(h, 6, c2, 90, 0.2);
+        this.fx.impulse(h[0]!, h[1]!, h[2]!, 14, 16);
+      }
+      this.prevRoar[i] = d.roar;
+      // Mouth glow when the jaw opens
+      if (d.jaw > 0.4) this.flare([d.spine[0]! + d.hx * 1.5 * d.scale, d.spine[1]!, d.spine[2]! + d.hz * 1.5 * d.scale], 1, c2, 30 * d.scale, 0.06);
+    });
+  }
+
 
   private readonly wp = [0, 0, 0];
   private slashTrail(f: Fighter, w: WeaponCloud, c: TeamColors, beat: number): void {
@@ -895,12 +1218,13 @@ export class ParticleSystem {
   }
 
   private ambient(dt: number, music: MusicState, prm: NormalizedParams, eng: CombatEngine): void {
+    this.musicPulse(dt, music, prm, eng);
     if (R() < 0.6) {
       const a = R() * Math.PI * 2;
       const r = Math.sqrt(R()) * 12;
       this.fx.emit(Math.cos(a) * r, R() * 4, Math.sin(a) * r, (R() - 0.5) * 0.2, 0.05, (R() - 0.5) * 0.2, 4 + R() * 3, [0.7, 0.7, 0.9], 1 + R() * 1.5, 0.2, 0, 0, 0.5);
     }
-    const rain = clamp((prm.sadness - 0.3) / 0.7);
+    const rain = Math.max(clamp((prm.sadness - 0.3) / 0.7), eng.arena.storm);
     if (rain > 0) {
       const want = rain * 700 * dt * (0.4 + this.q * 0.6);
       let n = Math.floor(want) + (R() < want % 1 ? 1 : 0);
@@ -924,5 +1248,42 @@ export class ParticleSystem {
       this.addRipple(cx, cz, 0.2 + music.onsetStrength * 0.3 * (0.4 + eng.heat));
       if (music.onsetStrength > 0.7 && eng.heat > 0.4) this.ring([cx, 0.06, cz], 0, 1, 0, 90, 8, this.cols[(R() * 2) | 0]!.aura, 0.6, 1.2, true);
     }
+  }
+
+  // ------------------------------------------------------------------ the arena breathes with the music
+  /**
+   * Kicks and bass move the world: every kick throws the floating embers and dust up
+   * off the floor and sends a soft ring out from the fight; the bass swells the embers'
+   * number; auras flare on the kick. (The floor, the rocks, the motes and the sky react
+   * to the same envelope in their shaders.)
+   */
+  private musicPulse(dt: number, music: MusicState, prm: NormalizedParams, eng: CombatEngine): void {
+    if (!music.live || !eng.running) return;
+    const [a, b] = eng.fighters;
+    const cx = (a.x + b.x) / 2, cz = (a.z + b.z) / 2;
+    if (music.kick) {
+      const k = music.kickStrength;
+      this.auraPulse = Math.max(this.auraPulse, 0.7 + k * 0.6);
+      this.fx.impulse(cx, 0, cz, 14, 1.2 + k * 2.2);
+      this.ring([cx, 0.05, cz], 0, 1, 0, 70 + 120 * k * eng.heat, 5 + 7 * k, this.cols[(R() * 2) | 0]!.aura, 0.55, 1.2, true);
+      if (k > 0.55) this.dust(cx, cz, 10 + 20 * k, 2 + 3 * k);
+      // Dust jumps off the floor all round the arena
+      for (let i = 0, n = this.n(30 + 60 * k); i < n; i++) {
+        const ang = R() * Math.PI * 2;
+        const r = 2 + Math.sqrt(R()) * 14;
+        this.fx.emit(cx + Math.cos(ang) * r, 0.05, cz + Math.sin(ang) * r, 0, 1 + R() * 2.5 * k, 0, 0.6 + R() * 0.4, [0.6, 0.58, 0.72], 1 + R(), 1.5, 3, 1, 0.55);
+      }
+    }
+    // Bass swells the embers
+    const want = music.bassSmooth * music.intensity * 70 * dt * this.quality.emission * (0.4 + prm.chaos);
+    let n = Math.floor(want) + (R() < want % 1 ? 1 : 0);
+    while (n-- > 0) {
+      const c = this.cols[(R() * 2) | 0]!;
+      const ang = R() * Math.PI * 2;
+      const r = Math.sqrt(R()) * 12;
+      this.fx.emit(cx + Math.cos(ang) * r, R() * 0.3, cz + Math.sin(ang) * r, (R() - 0.5) * 0.6, 0.8 + R() * 1.6 * music.bassSmooth, (R() - 0.5) * 0.6, 1.6 + R() * 1.6, R() < 0.3 ? c.hot : c.aura, 1 + R(), 0.4, -0.25, 0, 1.2);
+    }
+    // Fighters charging drag the embers towards themselves
+    for (const f of eng.fighters) if (f.charge > 0.3 || f.auraBoost > 0.6) this.fx.force(f.x, 1.2, f.z, 4, 6 * Math.max(f.charge, f.auraBoost));
   }
 }

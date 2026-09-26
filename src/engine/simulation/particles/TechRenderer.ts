@@ -3,6 +3,7 @@ import type { CombatEngine, Fighter } from '../combat/CombatEngine';
 import { J } from '../combat/Skeleton';
 import type { TechFx } from '../combat/TechFx';
 import { elemCols, FxPool, GOLD, R, RGB, TeamColors, unit, WHITE } from './common';
+import { PowerKit, PowerRenderer } from './PowerRenderer';
 
 /** The bits of the particle system a technique needs to draw with */
 export interface FxKit {
@@ -38,8 +39,11 @@ const ARMS: Kind[] = ['sword', 'spear', 'axe', 'greatsword', 'hammer'];
 export class TechRenderer {
   private time = 0;
   private flurryAcc = 0;
+  private readonly power: PowerRenderer;
 
-  constructor(private readonly k: FxKit) {}
+  constructor(private readonly k: FxKit) {
+    this.power = new PowerRenderer(k as PowerKit);
+  }
 
   update(dt: number, eng: CombatEngine, cols: [TeamColors, TeamColors]): void {
     this.time += dt;
@@ -63,6 +67,14 @@ export class TechRenderer {
         case 'coffin': this.coffin(f, beat, c1, c2); break;
         case 'bloom': this.bloom(f, beat, c1, c2, fade); break;
         case 'chains': this.chains(f, eng, beat, c1, c2, fade); break;
+        case 'slash': {
+          // A world-splitting crescent: the wave, colossal, carving the floor as it goes
+          f.variant = 'huge';
+          this.wave(f, eng, c1, c2, fade);
+          if (f.flying) for (let i = 0; i < 6; i++) this.k.fx.emit(f.x + (R() - 0.5) * 2, 0.05, f.z + (R() - 0.5) * 2, (R() - 0.5) * 3, 2 + R() * 5, (R() - 0.5) * 3, 1, R() < 0.5 ? c1 : c2, 2 + R() * 2, 1, 5, 1, 1.2);
+          break;
+        }
+        default: this.power.update(dt, f, eng, c1, c2, fade);
       }
       f.lastBeat = beat;
     }
@@ -306,7 +318,7 @@ export class TechRenderer {
     const ct = Math.cos(f.tilt), st = Math.sin(f.tilt);
     const sx = hx * ct, sy = st, sz = hz * ct;
     const R0 = Math.max(0.2, f.r);
-    const n = Math.min(360, 80 + R0 * 70);
+    const n = Math.min(R0 > 3 ? 900 : 360, 80 + R0 * 70);
     const huge = f.variant === 'huge';
     for (let i = 0; i < n; i++) {
       const th = (R() * 2 - 1) * 1.15;

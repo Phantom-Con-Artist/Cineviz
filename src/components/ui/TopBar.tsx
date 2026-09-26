@@ -1,4 +1,9 @@
 import React from 'react';
+import { ROSTER } from '../../content/roster';
+import type { ArchetypeId } from '../../engine/simulation/combat/Archetypes';
+
+/** The fighter's name for a style id (the id itself before the engine is up) */
+const who = (id: string) => (ROSTER[id as ArchetypeId]?.name ?? id).toUpperCase();
 
 interface TopBarProps {
   matchup: [string, string];
@@ -8,6 +13,8 @@ interface TopBarProps {
   seed: number;
   onReroll: () => void;
   directorOpen: boolean;
+  castOpen: boolean;
+  onCast: () => void;
   onDirector: () => void;
   debug: boolean;
   onDebug: () => void;
@@ -23,7 +30,7 @@ export const TopBar: React.FC<TopBarProps> = (p) => (
       CINEVIZ
     </div>
 
-    <Field k="SCENE" v={`${p.matchup[0].toUpperCase()} vs ${p.matchup[1].toUpperCase()}`} sub={p.palette.toUpperCase()} />
+    <Field k="SCENE" v={`${who(p.matchup[0])} vs ${who(p.matchup[1])}`} sub={p.palette.toUpperCase()} />
     <Field k="MUSIC" v={p.track ?? '—'} sub={p.bpm ? `${Math.round(p.bpm)} BPM` : undefined} className="hidden md:flex min-w-0" />
     <div className="flex items-center gap-2 shrink-0">
       <span>SEED</span>
@@ -37,6 +44,7 @@ export const TopBar: React.FC<TopBarProps> = (p) => (
 
     <div className="flex-1" />
 
+    <Toggle on={p.castOpen} onClick={p.onCast} label="CAST" title="The fighters: who they are, their weapons and powers (C)" />
     <Toggle on={p.directorOpen} onClick={p.onDirector} label="DIRECTOR" />
     <Toggle on={p.debug} onClick={p.onDebug} label="DEBUG" title="Developer overlays (D)" />
     <button

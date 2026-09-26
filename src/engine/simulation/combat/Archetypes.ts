@@ -1,19 +1,24 @@
 import type { Element, MoveName, StanceName } from './Moves';
+import type { WeaponType } from './weapons/Arsenal';
 
-/** Everything a fighter can hold; the particles morph between them */
-export type WeaponType =
-  | 'blade' | 'spear' | 'scythe' | 'staff' | 'claws'
-  | 'katana' | 'greatsword' | 'twinblade' | 'longsword' | 'kunai'
-  | 'hammer' | 'chargeAxe' | 'glaive' | 'gunlance';
+/** Everything a fighter can hold (the particles morph between them) — see weapons/Arsenal.ts */
+export type { WeaponType } from './weapons/Arsenal';
+export { WEAPON_LENGTH } from './weapons/Arsenal';
 
-/** How far the business end reaches past the hand (metres) */
-export const WEAPON_LENGTH: Record<WeaponType, number> = {
-  blade: 1.4, spear: 2.0, scythe: 1.9, staff: 1.0, claws: 0.55,
-  katana: 1.25, greatsword: 1.9, twinblade: 1.3, longsword: 1.7, kunai: 0.45,
-  hammer: 1.5, chargeAxe: 1.6, glaive: 1.25, gunlance: 1.8,
-};
+/** Supermoves open to any style whose fighter or weapon has the affinity (see powers/Loadout.ts) */
+export type SuperId =
+  | 'spearBarrage' | 'shurikenStorm' | 'laserEyes' | 'tornadoBarrage' | 'phantomBlades'
+  | 'meteorPunch' | 'lightningStep' | 'gravityCrush' | 'solarBurst';
+
+/** Arena-scale ultramoves */
+export type UltraId =
+  | 'sacredArsenal' | 'spearLand' | 'godOfWeapons' | 'shapeshiftDragon' | 'colossalStorm'
+  | 'worldSplitter' | 'heavensJudgment' | 'celestialRain' | 'voidSingularity' | 'titanArmament'
+  | 'infiniteCrossing' | 'starfall' | 'dragonStorm' | 'divineSpear' | 'arsenalApocalypse';
 
 export type TechId =
+  | SuperId
+  | UltraId
   // Saiyan
   | 'kiWave' | 'blinkStrike' | 'crimsonOverdrive' | 'razorHalo' | 'dragonFist' | 'spiritSphere'
   // Shinobi

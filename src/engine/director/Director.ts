@@ -9,7 +9,13 @@ import { WEAPON_LENGTH } from '../simulation/combat/Archetypes';
 
 export type ShotKind =
   | 'establish' | 'walk' | 'wide' | 'medium' | 'ots' | 'close' | 'hero' | 'god'
-  | 'orbit' | 'tracking' | 'aerial' | 'beam' | 'requiem' | 'summon' | 'pet' | 'impact' | 'follow';
+  | 'orbit' | 'tracking' | 'aerial' | 'beam' | 'requiem' | 'summon' | 'pet' | 'impact' | 'follow'
+  /** Extreme wide that frames a whole arena-scale power */
+  | 'vista'
+  /** Worm's-eye: lens on the ground behind the caster, looking up at what towers over them */
+  | 'colossus'
+  /** Scale reveal: a long lens from far away, the fighters specks under the power (slow dolly zoom) */
+  | 'titan';
 
 /** The cinematographic grammar every concrete shot belongs to */
 export type ShotType = 'WIDE' | 'TWO_SHOT' | 'FOLLOW' | 'CLOSE_UP' | 'IMPACT' | 'ORBIT' | 'LOW_ANGLE' | 'HIGH_ANGLE';
@@ -17,23 +23,24 @@ export type ShotType = 'WIDE' | 'TWO_SHOT' | 'FOLLOW' | 'CLOSE_UP' | 'IMPACT' | 
 const SHOT_LABEL: Record<ShotKind, string> = {
   establish: 'ESTABLISHING', walk: 'TRACKING WALK', wide: 'WIDE MASTER', medium: 'MEDIUM DUEL', ots: 'OVER SHOULDER',
   close: 'CLOSE UP', hero: 'LOW HERO', god: 'GOD VIEW', orbit: 'BULLET TIME', tracking: 'TRACKING', aerial: 'AERIAL',
-  beam: 'BEAM WIDE', requiem: 'REQUIEM', summon: 'SUMMON', pet: 'FAMILIAR', impact: 'IMPACT', follow: 'FOLLOW',
+  beam: 'BEAM WIDE', requiem: 'REQUIEM', summon: 'SUMMON', pet: 'FAMILIAR', impact: 'IMPACT', follow: 'FOLLOW', vista: 'EXTREME WIDE',
+  colossus: "WORM'S EYE", titan: 'SCALE REVEAL',
 };
 
 const SHOT_TYPE: Record<ShotKind, ShotType> = {
   establish: 'WIDE', walk: 'FOLLOW', wide: 'WIDE', medium: 'TWO_SHOT', ots: 'TWO_SHOT', close: 'CLOSE_UP', hero: 'LOW_ANGLE',
   god: 'HIGH_ANGLE', orbit: 'ORBIT', tracking: 'FOLLOW', aerial: 'TWO_SHOT', beam: 'WIDE', requiem: 'HIGH_ANGLE',
-  summon: 'WIDE', pet: 'WIDE', impact: 'IMPACT', follow: 'FOLLOW',
+  summon: 'WIDE', pet: 'WIDE', impact: 'IMPACT', follow: 'FOLLOW', vista: 'WIDE', colossus: 'LOW_ANGLE', titan: 'WIDE',
 };
 
 /** Default blend into a shot (seconds): impacts snap in, wides drift */
 const TRANSITION: Partial<Record<ShotKind, number>> = {
-  impact: 0.18, close: 0.55, follow: 0.7, orbit: 0.5, hero: 0.9, wide: 1.1, establish: 1.4, god: 1.2, requiem: 1,
+  impact: 0.18, vista: 1.6, colossus: 1.1, titan: 1.8, close: 0.55, follow: 0.7, orbit: 0.5, hero: 0.9, wide: 1.1, establish: 1.4, god: 1.2, requiem: 1,
 };
 
 /** Handheld drift per shot type (metres of camera sway) */
 /** Shots that frame the pair, so swapping the "subject" does not change the picture */
-const GROUP_SHOT = new Set<ShotKind>(['establish', 'walk', 'wide', 'medium', 'god', 'tracking', 'aerial', 'beam', 'summon']);
+const GROUP_SHOT = new Set<ShotKind>(['establish', 'walk', 'wide', 'medium', 'god', 'tracking', 'aerial', 'beam', 'summon', 'vista', 'colossus', 'titan']);
 /** Shots whose distance is solved from the bodies' bounding box (and may be pushed back to keep them in frame) */
 const FIT_SHOT = new Set<ShotKind>(['walk', 'wide', 'medium', 'tracking', 'aerial', 'follow', 'impact', 'close', 'orbit']);
 /** Set pieces big enough to change the shot as soon as they start */
@@ -95,7 +102,20 @@ const POOLS: Record<PhraseKind, ShotKind[]> = {
   blade_lock: ['medium', 'hero', 'medium'],
   grapple: ['medium', 'tracking', 'wide'],
   super: ['medium', 'wide'],
-  ultra: ['wide', 'god', 'summon', 'wide'],
+  ultra: ['vista', 'wide', 'summon', 'vista'],
+  hybrid: ['medium', 'tracking', 'wide'],
+  speed_blitz: ['wide', 'tracking', 'god', 'wide'],
+  rush: ['follow', 'medium', 'tracking'],
+};
+
+/** Camera habits per fight flavour (see combat/Flavors.ts) */
+const FLAVOR_SHOTS: Record<string, ShotKind[]> = {
+  blitz: ['tracking', 'follow', 'wide'],
+  brawl: ['medium', 'follow', 'tracking'],
+  duel: ['medium', 'wide', 'tracking'],
+  sky: ['aerial', 'wide', 'god'],
+  arcana: ['wide', 'medium', 'aerial'],
+  rampage: ['follow', 'tracking', 'medium'],
 };
 
 /** Phrases where nobody is trading blows: the fighters pose, stare, power up */
@@ -106,7 +126,7 @@ const POSE_SHOT = new Set<ShotKind>(['close', 'hero', 'ots']);
 const LETTERBOX: Record<PhraseKind, number> = {
   intro: 0.8, tension: 0.35, standoff: 0.55, exchange: 0, dash_clash: 0.4, weapon_duel: 0.25, clone_jutsu: 0.4,
   ki_barrage: 0.15, beam_clash: 1, air_combo: 0.3, power_up: 1, summon: 0.5, pet_assault: 0.3, finisher: 1,
-  mirror_clash: 0.15, blade_lock: 0.5, grapple: 0.2, super: 0.55, ultra: 1,
+  mirror_clash: 0.15, blade_lock: 0.5, grapple: 0.2, super: 0.55, ultra: 1, hybrid: 0.2, speed_blitz: 0.3, rush: 0.25,
 };
 
 /** Critically damped spring (Unity-style SmoothDamp) */
@@ -186,6 +206,8 @@ export class Director {
   shotLabel = 'ESTABLISHING';
   /** Subtitle for a super move / ultra, and how long it has been showing (seconds) */
   caption = '';
+  /** Combo counter: connected blows by one side in a row (a gap or a reply resets it) */
+  combo = { count: 0, team: 0, last: -99, pop: -99 };
   captionAge = 99;
   captionUltra = false;
   shotNumber = 1;
@@ -205,6 +227,16 @@ export class Director {
   /** 0 … 1 slow dolly push towards the pair when a heavy blow winds up (instead of a cut) */
   private push = 0;
   private lastImpact = -99;
+  /** An arena-scale power is playing: until (clock), radius and centre — the camera stays wide enough to show it */
+  private epic = { until: -1, radius: 0, x: 0, z: 0 };
+  /** The held breath before an ultramove lands (0 … 1) */
+  hush = 0;
+  /** Ground rumble while an ultramove builds (a floor under the shake, 0 … 1) */
+  private rumble = 0;
+  /** The ultra's caster (the colossus shot stands behind them) */
+  private caster = 0;
+  /** Blast pushback: the camera is thrown outwards when an ultra lands (metres, decays) */
+  private blast = 0;
   private engRef: CombatEngine | null = null;
   private readonly box = new Float32Array(3 * 64);
   private boxN = 0;
@@ -224,6 +256,7 @@ export class Director {
   private trauma = 0;
   private fovKick = 0;
   private slow: { scale: number; until: number }[] = [];
+  private lastSlow = -99;
   private clock = 0;
   private lastBeat = 0;
   private shotBeats = 0;
@@ -258,6 +291,7 @@ export class Director {
   onEvent(e: CombatEvent, eng: CombatEngine, prm: NormalizedParams): void {
     this.prm = prm;
     const epic = prm.epic;
+    this.countCombo(e);
     switch (e.type) {
       case 'windup': {
         // A heavy blow is coming: lean in on the pair (a slow dolly), don't cut away from it
@@ -435,9 +469,9 @@ export class Director {
       case 'appear':
         this.bloom = 0.8;
         break;
-      case 'tech_charge':
+      case 'super_started':
         this.auraUntil = this.clock + 2.8;
-        this.mark(e.label ? `Technique: ${e.label}` : 'Technique');
+        this.mark(e.label ? `Supermove: ${e.label}` : 'Supermove');
         this.caption = e.label ?? '';
         this.captionAge = 0;
         this.captionUltra = false;
@@ -445,16 +479,112 @@ export class Director {
         this.letterboxTarget = Math.max(this.letterboxTarget, 0.6);
         this.bloom = Math.max(this.bloom, 0.6);
         break;
-      case 'ultra_start':
+      case 'super_charge':
+        this.push = Math.max(this.push, 0.5 + prm.drama * 0.4);
+        this.shake(0.12);
+        break;
+      case 'super_released':
+        this.override(eng, (e.radius ?? 3) > 4.5 || eng.spectacle() ? 'summon' : this.rngPick(['medium', 'wide', 'tracking']), e.fighter, false);
+        this.fovKick = 5;
+        this.flash = Math.max(this.flash, 0.3);
+        break;
+      case 'super_impact':
+        this.bulletTime(0.14, 0.9);
+        this.shake(1);
+        this.flash = 1;
+        this.impactFrame = epic > 0.3 ? 0.08 : 0;
+        this.bloom = 1.4;
+        this.chroma = 1;
+        this.mark('Supermove impact');
+        break;
+      case 'ultra_started':
         this.caption = e.label ?? '';
         this.captionAge = 0;
         this.captionUltra = true;
-        this.override(eng, this.rngPick(['summon', 'summon', 'wide']), e.fighter, true);
+        // Anticipation is aura farming: a low hero angle on the caster is welcome here
+        this.auraUntil = this.clock + 2.5;
+        this.beginEpic(eng, e.radius ?? 10, (e.beats ?? 12) * eng.spb + 6);
+        this.lastOverride = -9;
+        this.caster = e.fighter;
+        this.rumble = 0.15;
+        this.override(eng, 'hero', e.fighter, true);
         this.mark(e.label ? `Ultra: ${e.label}` : 'Ultra');
         this.letterboxTarget = 1;
         this.bloom = 1.2;
         this.shake(0.3);
-        this.bulletTime(0.4, 1.2);
+        break;
+      case 'ultra_formation':
+        this.lastOverride = -9;
+        // Look up at it from the ground, then cut far away to show how big it really is
+        this.caster = e.fighter;
+        this.rumble = Math.max(this.rumble, 0.32);
+        this.override(eng, 'colossus', e.fighter, true, undefined, true);
+        this.book('titan', e.fighter, 2.2 + Math.random() * 0.8, 1.6);
+        this.bloom = Math.max(this.bloom, 0.8);
+        this.mark('Formation');
+        break;
+      case 'ultra_peak':
+        // The music's tension: everything holds its breath, then the drop lands the impact
+        this.hush = 1;
+        this.rumble = 0.5;
+        this.lastOverride = -9;
+        // Held breath: whichever of the two scale shots is not already up
+        this.override(eng, this.shot.kind === 'titan' ? 'colossus' : 'titan', e.fighter, true, undefined, true);
+        this.letterboxTarget = 1;
+        this.mark('Peak');
+        break;
+      case 'ultra_impact':
+        this.hush = 0;
+        this.rumble = 0;
+        this.bulletTime(0.12, 1.4);
+        this.shake(1);
+        this.trauma = 1;
+        // The blast throws the lens back into an extreme wide of the whole arena
+        this.blast = 6 + (this.epic.radius || 10) * 0.35;
+        this.lastOverride = -9;
+        this.override(eng, 'vista', e.target, true, undefined, true);
+        this.flash = 1;
+        this.impactFrame = 0.1;
+        this.bloom = 1.8;
+        this.chroma = 1;
+        this.mark('Ultra impact');
+        break;
+      case 'ultra_aftermath':
+        this.rumble = 0;
+        this.epic.until = Math.min(this.epic.until, this.clock + (e.beats ?? 3) * eng.spb);
+        this.lastOverride = -9;
+        this.override(eng, 'vista', e.target, false, undefined, true);
+        this.desat = Math.max(this.desat, 0.25);
+        break;
+      case 'weapon_release':
+      case 'weapon_recall':
+        this.speedLines = Math.max(this.speedLines, 0.4);
+        this.fovKick = e.critical ? -3 : 3;
+        if (e.critical) this.shake(0.2);
+        break;
+      case 'weapon_manifest':
+        this.flash = Math.max(this.flash, 0.35);
+        this.bloom = Math.max(this.bloom, 0.8);
+        this.mark('Weapon manifest');
+        break;
+      case 'speed_dash':
+        this.speedLines = 1;
+        this.fovKick = 7;
+        this.chroma = Math.max(this.chroma, 0.4);
+        break;
+      case 'velocity_break':
+        this.bulletTime(0.2, 0.6);
+        this.shake(0.8);
+        this.flash = Math.max(this.flash, 0.7);
+        this.chroma = 1;
+        this.speedLines = 1;
+        this.mark('Velocity break');
+        break;
+      case 'perfect_dodge':
+        this.bulletTime(0.18, 0.8);
+        this.speedLines = 1;
+        this.chroma = Math.max(this.chroma, 0.6);
+        this.mark('Perfect dodge');
         break;
       case 'tech_release':
         // Pull back so the shot, its path and its target are all in frame
@@ -505,9 +635,36 @@ export class Director {
     }
   }
 
+  private countCombo(e: CombatEvent): void {
+    const n = e.type === 'hit' || e.type === 'tech_hit' || e.type === 'projectile_hit' || e.type === 'pet_hit' || e.type === 'super_impact'
+      ? 1 : e.type === 'ultra_impact' ? 5 : 0;
+    const c = this.combo;
+    // A blow from the other side, or a long pause, starts a new count
+    if (e.type === 'block' || e.type === 'clash' || (n && e.fighter !== c.team) || this.clock - c.last > 1.8) {
+      if (e.type === 'block' || e.type === 'clash' || n) c.count = 0;
+    }
+    if (!n) return;
+    c.team = e.fighter;
+    c.count += n;
+    c.last = this.clock;
+    c.pop = this.clock;
+  }
+
+  /** Seconds on the director clock (UI animation) */
+  get now(): number {
+    return this.clock;
+  }
+
   private bulletTime(scale: number, seconds: number): void {
     const sm = this.prm.slowMotion;
     if (sm <= 0.02) return;
+    // Slow motion is a spice: every blow slowed means none of them are special, and each
+    // slowdown pulls the fight off the beat until the speed ramp catches up. The big
+    // moments always get it; lesser ones only when the last slowdown is a while back
+    const major = scale <= 0.12 || seconds >= 1.1;
+    const gap = 2.6 + (1 - sm) * 2;
+    if (!major && (this.slow.length > 0 || this.clock - this.lastSlow < gap)) return;
+    this.lastSlow = this.clock;
     this.slow.push({ scale: lerp(1, scale, clamp(sm * 1.3)), until: this.clock + seconds * (0.5 + sm * 0.6) });
   }
 
@@ -516,14 +673,17 @@ export class Director {
   }
 
   private nextFromPool(): ShotKind {
+    // Each kind of fight has its own camera habits: sky wars look up, brawls stay close
+    const fav = this.engRef ? FLAVOR_SHOTS[this.engRef.flavor.id] : undefined;
+    if (fav && !BIG_PHRASE.has(this.phrase) && Math.random() < 0.3) return fav[Math.floor(Math.random() * fav.length)]!;
     const pool = POOLS[this.phrase];
     this.poolIdx = (this.poolIdx + 1 + (Math.random() < 0.3 ? 1 : 0)) % pool.length;
     return pool[this.poolIdx]!;
   }
 
   /** Event-driven shot change, rate limited so big moments never stack cuts */
-  private override(eng: CombatEngine, kind: ShotKind, subject: number, cut: boolean, focus?: readonly number[]): void {
-    if (this.clock - this.lastOverride < 4.5 || this.shot.age < 1.5) return;
+  private override(eng: CombatEngine, kind: ShotKind, subject: number, cut: boolean, focus?: readonly number[], force = false): void {
+    if (!force && (this.clock - this.lastOverride < 4.5 || this.shot.age < 1.5)) return;
     this.lastOverride = this.clock;
     this.queue.length = 0;
     this.setShot(kind, subject, cut, eng, focus);
@@ -556,6 +716,11 @@ export class Director {
     this.book(Math.random() < 0.35 + this.prm.epic * 0.3 ? 'wide' : 'medium', victim, slowHold, 1.1);
   }
 
+  private beginEpic(eng: CombatEngine, radius: number, seconds: number): void {
+    const [a, b] = eng.fighters;
+    this.epic = { until: this.clock + seconds, radius, x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
+  }
+
   /** Nobody is trading blows right now: close-ups and low hero angles are welcome */
   private auraFarming(eng?: CombatEngine | null): boolean {
     if (!eng || !eng.running) return true;
@@ -572,6 +737,11 @@ export class Director {
   private setShot(kind: ShotKind, subject: number, cut: boolean, eng?: CombatEngine, focus?: readonly number[], transition?: number): void {
     // Mid-fight the action must read: no close-ups / low angles / over-the-shoulder
     if (POSE_SHOT.has(kind) && !this.auraFarming(eng ?? this.engRef)) kind = 'medium';
+    // Never stay close while an arena-scale power plays: its scale must read
+    if (this.clock < this.epic.until) {
+      const posing = kind === 'hero' && this.clock < this.auraUntil;
+      if (!posing && kind !== 'vista' && kind !== 'god' && kind !== 'requiem' && kind !== 'colossus' && kind !== 'titan') kind = 'vista';
+    }
     const s = this.shot;
     const same = s.kind === kind && (s.subject === subject || GROUP_SHOT.has(kind));
     if (same && !focus) return;
@@ -652,6 +822,7 @@ export class Director {
     this.prm = prm;
     this.engRef = eng;
     this.push = Math.max(0, this.push - dt * 0.8);
+    this.hush = Math.max(0, this.hush - dt * 0.35);
     this.clock += dt;
     this.captionAge += dt;
     const epic = prm.epic;
@@ -660,8 +831,9 @@ export class Director {
     // runs a little fast until it has caught up with the song (a speed ramp)
     this.slow = this.slow.filter((s) => s.until > this.clock);
     let target = this.slow.reduce((m, s) => Math.min(m, s.scale), 1);
-    if (this.slow.length === 0) target = clamp(1 + this.lag * 0.9, 0.85, 2.4);
-    this.timeScale = damp(this.timeScale, target, target < this.timeScale ? 16 : 4, dt);
+    // Catch-up ramp: brisk but never cartoonish
+    if (this.slow.length === 0) target = clamp(1 + this.lag * 0.8, 0.85, 1.7);
+    this.timeScale = damp(this.timeScale, target, target < this.timeScale ? 16 : 3, dt);
 
     if (!eng.running) {
       this.phrase = 'intro';
@@ -670,7 +842,8 @@ export class Director {
     } else if (this.queue.length && this.queue[0]!.at <= this.clock) {
       // Planned sequence: next booked shot
       const b = this.queue.shift()!;
-      this.setShot(b.kind, b.subject, false, eng, b.focus, b.transition);
+      // The scale reveal lands as a hard cut: from the ground to a mile away
+      this.setShot(b.kind, b.subject, b.kind === 'titan', eng, b.focus, b.transition);
     } else if (playing && music.section !== this.lastSection) {
       // The song opens up (drop / climax): reveal on it — a low hero angle or a wide
       const big = music.section === 'drop' || music.section === 'climax';
@@ -752,11 +925,12 @@ export class Director {
       }
     }
     const cp = Math.cos(this.pitch.x);
+    const dist = this.dist.x + this.blast;
     this.camTarget.set(this.fx.x, this.fy.x, this.fz.x);
     this.camPos.set(
-      this.fx.x + Math.cos(this.yaw.x) * cp * this.dist.x,
-      this.fy.x + Math.sin(this.pitch.x) * this.dist.x,
-      this.fz.x + Math.sin(this.yaw.x) * cp * this.dist.x,
+      this.fx.x + Math.cos(this.yaw.x) * cp * dist,
+      this.fy.x + Math.sin(this.pitch.x) * dist,
+      this.fz.x + Math.sin(this.yaw.x) * cp * dist,
     );
     // Handheld: slow, organic drift of the operator (never a constant shake)
     const hh = HANDHELD[SHOT_TYPE[this.shot.kind]] * (0.55 + prm.chaos * 0.6) * (0.7 + prm.drama * 0.4) * (0.8 + eng.heat * 0.4);
@@ -772,7 +946,9 @@ export class Director {
     this.fovKick = damp(this.fovKick, 0, 4, dt);
     const beatPunch = playing ? Math.pow(1 - music.beatPhase, 4) * music.beatStrength * eng.heat * 1.2 : 0;
     this.outFov = clamp(this.fov.x + this.fovKick - beatPunch, 14, 75);
-    this.trauma = Math.max(0, this.trauma - dt * 1.4);
+    if (this.clock > this.epic.until) this.rumble = 0;
+    this.trauma = Math.max(0, this.trauma - dt * 1.4, this.rumble * (0.85 + 0.15 * Math.sin(this.clock * 23)));
+    this.blast = damp(this.blast, 0, 1.3, dt);
     const sh = this.trauma * this.trauma;
     const t = this.clock * 13;
     const drift = prm.chaos * 0.02;
@@ -790,8 +966,8 @@ export class Director {
     this.speedLines = damp(this.speedLines, 0, 2.5, dt);
     this.impactFrame = Math.max(0, this.impactFrame - dt);
     this.desat = damp(this.desat, 0, 0.4, dt);
-    this.saturation = -prm.sadness * 0.55 - this.desat * 0.6 + (this.timeScale < 0.5 ? 0.12 : 0.05);
-    const lbWant = !eng.running ? 0 : Math.max(this.letterboxTarget, this.timeScale < 0.6 ? 0.8 * (0.4 + epic * 0.6) : 0);
+    this.saturation = -prm.sadness * 0.55 - this.desat * 0.6 - this.hush * 0.45 + (this.timeScale < 0.5 ? 0.12 : 0.05);
+    const lbWant = !eng.running ? 0 : Math.max(this.letterboxTarget, this.hush, this.timeScale < 0.6 ? 0.8 * (0.4 + epic * 0.6) : 0);
     this.letterbox = damp(this.letterbox, lbWant, 2, dt);
   }
 
@@ -1092,6 +1268,71 @@ export class Director {
         w.pitch = 0.04;
         w.dist = big ? 12 : 8.5;
         w.fov = 42;
+        break;
+      }
+      case 'vista': {
+        // Pull far back and high: the whole affected arena, the fighters small in it
+        const sp = eng.spectacle();
+        const on = this.epic.until > this.clock;
+        const R = Math.max(on ? this.epic.radius : 0, sp ? sp.r * 1.4 : 0, d * 0.8, 6);
+        const cx = on ? lerp(mx, this.epic.x, 0.4) : mx;
+        const cz = on ? lerp(mz, this.epic.z, 0.4) : mz;
+        w.fx = sp ? lerp(cx, sp.x, 0.3) : cx; w.fy = sp ? Math.min(6, lerp(1.2, sp.y, 0.35)) : 1.4; w.fz = sp ? lerp(cz, sp.z, 0.3) : cz;
+        w.yaw = A + side * (Math.PI / 2 + 0.45) + side * τ * 0.045;
+        // Low enough that the power stands against the sky rather than lying on the floor
+        w.pitch = 0.16 + Math.min(0.14, R * 0.007);
+        w.fov = 54;
+        w.dist = Math.min(60, (R * 1.15) / Math.tan((w.fov * Math.PI) / 360) * 0.72 + 3);
+        this.collect(eng, [0, 1]);
+        w.dist = Math.max(w.dist, this.fitDistance(w.fx, w.fy, w.fz, w.yaw, w.pitch, w.fov, 0.6));
+        break;
+      }
+      case 'colossus': {
+        // Lens a hand above the ground a few metres behind the caster, looking up past them
+        // at the power: the caster a silhouette in the foreground, the thing towering above
+        const c = eng.fighters[this.caster]!;
+        const cx = c.joints[J.pelvis * 3]!, cz = c.joints[J.pelvis * 3 + 2]!;
+        const sp = eng.spectacle();
+        const R = Math.max(this.epic.radius, sp ? sp.r : 0, 6);
+        const ex = sp ? sp.x : this.epic.x, ez = sp ? sp.z : this.epic.z;
+        const ey = Math.max(sp ? sp.y : 0, R * 0.42, 3.2);
+        let bx = cx - ex, bz = cz - ez;
+        const bl = Math.hypot(bx, bz);
+        if (bl < 0.5) { bx = -Math.cos(A); bz = -Math.sin(A); } else { bx /= bl; bz /= bl; }
+        // A little off the caster's shoulder, slowly craning up
+        const off = side * 1.6;
+        const back = 3.4 + τ * 0.25;
+        const camX = cx + bx * back - bz * off, camZ = cz + bz * back + bx * off;
+        const camY = 0.35 + Math.min(1.1, τ * 0.18);
+        w.fx = lerp(cx, ex, 0.6); w.fz = lerp(cz, ez, 0.6); w.fy = ey * 0.8;
+        const hx = camX - w.fx, hz = camZ - w.fz;
+        const hd = Math.hypot(hx, hz) || 1;
+        w.yaw = Math.atan2(hz, hx);
+        w.pitch = Math.atan2(camY - w.fy, hd);
+        w.dist = Math.hypot(hd, camY - w.fy);
+        w.fov = 70 - Math.min(8, τ * 1.2);
+        break;
+      }
+      case 'titan': {
+        // Far away and near the horizon on a long lens: the power fills the frame, the
+        // fighters specks at its foot. A slow dolly zoom (the lens tightens as the camera
+        // backs off) makes it swell against the sky
+        // Size it by what actually stands there (a sky full of weapons, a dragon, a storm),
+        // not by the blast radius: a low power framed for its radius reads as a toy
+        const sp = eng.spectacle();
+        const R = sp ? Math.max(sp.r * 1.2, sp.y * 1.3, 5) : Math.max(5, this.epic.radius * 0.6);
+        const on = this.epic.until > this.clock;
+        const cx = on ? lerp(mx, this.epic.x, 0.5) : mx, cz = on ? lerp(mz, this.epic.z, 0.5) : mz;
+        w.fx = sp ? lerp(cx, sp.x, 0.4) : cx; w.fz = sp ? lerp(cz, sp.z, 0.4) : cz;
+        w.fy = Math.max(2, R * 0.4, sp ? sp.y * 0.7 : 0);
+        w.yaw = A + side * (Math.PI / 2 - 0.35) - side * τ * 0.02;
+        const z = smoothstep(0, 5, τ);
+        w.fov = lerp(34, 22, z);
+        // About 2.5 R of height in frame at the start, the same framing as the lens tightens
+        const t0 = Math.tan((34 * Math.PI) / 360);
+        w.dist = Math.min(95, ((R * 1.25) / t0) * (t0 / Math.tan((w.fov * Math.PI) / 360)));
+        // Just above the ground, the horizon low in frame: everything towers
+        w.pitch = Math.atan2(1.2 - w.fy, w.dist) + 0.02;
         break;
       }
       case 'pet': {

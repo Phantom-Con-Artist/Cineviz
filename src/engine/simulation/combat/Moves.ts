@@ -5,16 +5,20 @@ import { MoveDef, Zone } from './moves/defs';
 import { kickEase, retractEase, strikeEase, StrikeKind } from './MotionPrior';
 import { STYLES } from './moves/styles';
 import { TECH_POSES } from './moves/techposes';
+import { BASICS } from './moves/basics';
+import { WEAPON_MOVES } from './moves/weaponmoves';
+import { POWER_POSES } from './moves/powerposes';
 
 export { STANCE } from './moves/stances';
 export type { StanceName } from './moves/stances';
 export type { MoveDef, MoveKey, Zone, Element } from './moves/defs';
 
 /**
- * The move library: shared moves, twelve unique basics per archetype and the
- * wind-ups / releases of every super move — 230-odd moves in all.
+ * The move library: shared moves, the extended hand-to-hand vocabulary, twelve unique
+ * basics per archetype, the per-weapon-archetype vocabulary, and the wind-ups / releases
+ * of every super move and ultramove.
  */
-const LIBRARY = { ...CORE, ...STYLES, ...TECH_POSES } satisfies Record<string, MoveDef>;
+const LIBRARY = { ...CORE, ...BASICS, ...STYLES, ...WEAPON_MOVES, ...TECH_POSES, ...POWER_POSES } satisfies Record<string, MoveDef>;
 export type MoveName = keyof typeof LIBRARY;
 export const MOVES: Record<MoveName, MoveDef> = LIBRARY;
 export const MOVE_COUNT = Object.keys(MOVES).length;

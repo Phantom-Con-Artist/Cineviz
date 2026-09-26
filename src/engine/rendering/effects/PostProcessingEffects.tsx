@@ -27,7 +27,7 @@ export const PostProcessingEffects: React.FC<PostProcessingEffectsProps> = ({ en
   useFrame(() => {
     const d = bridge.director;
     const m = bridge.getMusicState();
-    if (bloom.current) bloom.current.intensity = 1.25 + d.bloom * 1.6 + d.flash * 1.5 + m.bass * m.intensity * 0.6;
+    if (bloom.current) bloom.current.intensity = (1.25 + d.bloom * 1.6 + d.flash * 1.5 + m.bassSmooth * m.intensity * 0.6 + m.pulse * 0.5 - d.hush * 0.5) * bridge.particles.quality.bloom;
     if (chroma.current) {
       const c = 0.0006 + d.chroma * 0.006;
       chroma.current.offset.set(c, c * 0.6);

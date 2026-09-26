@@ -5,10 +5,12 @@ import { TransportTimeline } from '../components/ui/TransportTimeline';
 import { CreativeStrip } from '../components/ui/CreativeStrip';
 import { DirectorPanel } from '../components/ui/DirectorPanel';
 import { DebugPanel } from '../components/ui/DebugPanel';
+import { RosterPanel } from '../components/ui/RosterPanel';
 import { ExportDialog } from '../components/ui/ExportDialog';
 import { MobileShell, RotatePrompt, useCompactLayout } from '../components/ui/MobileShell';
 import { formatClock } from '../components/ui/CinematicOverlay';
 import { AudioEngine } from '../audio/AudioEngine';
+import { FxLevel } from '../utils/quality';
 import { EngineBridge } from '../engine/EngineBridge';
 import { downloadBlob, VideoExporter, VideoExportOptions } from '../engine/export/VideoExporter';
 import { CreativeParameters, DEFAULT_CREATIVE_PARAMETERS } from '../types/creative';
@@ -55,6 +57,7 @@ export const WorkstationLayout: React.FC = () => {
 
   const [directorOpen, setDirectorOpen] = useState(true);
   const [debug, setDebug] = useState(false);
+  const [castOpen, setCastOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exporter, setExporter] = useState<VideoExporter | null>(null);
   const [exportStatus, setExportStatus] = useState<ExportStatus | null>(null);
@@ -62,6 +65,16 @@ export const WorkstationLayout: React.FC = () => {
   const audioEngineRef = useRef<AudioEngine | null>(null);
   const engineBridgeRef = useRef<EngineBridge | null>(null);
   const [bridge, setBridge] = useState<EngineBridge | null>(null);
+  const [fxLevel, setFxLevelState] = useState<FxLevel>('HIGH');
+  useEffect(() => {
+    if (!bridge) return;
+    setFxLevelState(bridge.fxLevel);
+  }, [bridge]);
+  const onFxLevel = useCallback((l: FxLevel) => {
+    setFxLevelState(l);
+    engineBridgeRef.current?.setFxLevel(l);
+  }, []);
+  const extraControls = { fxLevel, onFxLevel };
   const exporterRef = useRef<VideoExporter | null>(null);
   exporterRef.current = exporter;
 
@@ -176,7 +189,7 @@ export const WorkstationLayout: React.FC = () => {
     if (bridge) bridge.debug = debug;
   }, [bridge, debug]);
 
-  // Keyboard: space = play / pause, D = debug
+  // Keyboard: space = play / pause, D = debug, C = the cast
   const playRef = useRef<() => void>(() => {});
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -186,6 +199,7 @@ export const WorkstationLayout: React.FC = () => {
         e.preventDefault();
         playRef.current();
       } else if (e.key === 'd' || e.key === 'D') setDebug((d) => !d);
+      else if (e.key === 'c' || e.key === 'C') setCastOpen((o) => !o);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -310,7 +324,7 @@ export const WorkstationLayout: React.FC = () => {
           bridge={bridge}
           viewport={<CinematicViewport settings={viewportSettings} bridge={bridge} debug={false} exporter={exporter} hud={false} />}
           timeline={timeline(true)}
-          creative={<CreativeStrip layout="sheet" parameters={creativeParams} onChange={handleCreativeParamsChange} onReset={handleResetDefaults} />}
+          creative={<CreativeStrip layout="sheet" parameters={creativeParams} onChange={handleCreativeParamsChange} onReset={handleResetDefaults} {...extraControls} />}
           exportBar={exportBar}
           matchup={matchup}
           trackTitle={trackMeta?.title ?? null}
@@ -319,6 +333,9 @@ export const WorkstationLayout: React.FC = () => {
           exporting={locked}
           directorOpen={directorOpen}
           onDirector={() => setDirectorOpen((o) => !o)}
+          cast={<RosterPanel bridge={bridge} seed={seed} onClose={() => setCastOpen(false)} compact />}
+          castOpen={castOpen}
+          onCast={() => setCastOpen((o) => !o)}
           onPlayPause={() => playRef.current()}
           onExport={openExport}
           sampleTracks={SAMPLE_TRACKS}
@@ -342,6 +359,8 @@ export const WorkstationLayout: React.FC = () => {
         onReroll={handleRandomizeSeed}
         directorOpen={directorOpen}
         onDirector={() => setDirectorOpen((o) => !o)}
+        castOpen={castOpen}
+        onCast={() => setCastOpen((o) => !o)}
         debug={debug}
         onDebug={() => setDebug((d) => !d)}
         exporting={locked}
@@ -355,10 +374,11 @@ export const WorkstationLayout: React.FC = () => {
           {bridge && debug && <DebugPanel bridge={bridge} settings={viewportSettings} onSettings={setViewportSettings} />}
         </CinematicViewport>
         {exportBar}
+        {castOpen && <RosterPanel bridge={bridge} seed={seed} onClose={() => setCastOpen(false)} />}
       </main>
 
       {timeline(false)}
-      <CreativeStrip parameters={creativeParams} onChange={handleCreativeParamsChange} onReset={handleResetDefaults} />
+      <CreativeStrip parameters={creativeParams} onChange={handleCreativeParamsChange} onReset={handleResetDefaults} {...extraControls} />
 
       {dialog}
       {portraitPhone && <RotatePrompt />}

@@ -3,6 +3,9 @@ import type { TechId } from './Archetypes';
 import type { CombatEngine, Fighter } from './CombatEngine';
 import type { Element } from './Moves';
 import { J } from './Skeleton';
+import { SUPERS } from './powers/Supers';
+import { ULTRAS } from './powers/Ultras';
+import { Power } from './powers/PowerKit';
 
 /**
  * Super moves and ultras. Each one is a little timeline on the beat grid:
@@ -17,8 +20,11 @@ import { J } from './Skeleton';
 export interface TechDef {
   name: string;
   element: Element;
+  /** Beats from the start to the main impact (the choreographer lands it on a drop) */
   lead: number;
   ultra?: boolean;
+  /** Area the power covers (metres) — the camera pulls back to show it */
+  radius?: number;
   run: (e: CombatEngine, s: number, A: Fighter, D: Fighter) => number;
 }
 
@@ -26,7 +32,7 @@ const UP: Vector3Tuple = [0, 1, 0];
 
 function title(e: CombatEngine, A: Fighter, D: Fighter, t: number, id: TechId): void {
   const def = TECHNIQUES[id];
-  e.at(t, () => e.emit(def.ultra ? 'ultra_start' : 'tech_charge', A.joint(J.chest), UP, def.ultra ? 1 : 0.7, A.team, D.team, { label: def.name, sub: def.element }));
+  e.at(t, () => e.emit(def.ultra ? 'ultra_started' : 'super_started', A.joint(J.chest), UP, def.ultra ? 1 : 0.7, A.team, D.team, { label: def.name, sub: def.element, radius: def.radius ?? (def.ultra ? 8 : 3), beats: def.lead }));
 }
 function release(e: CombatEngine, A: Fighter, D: Fighter, t: number, el: Element, big = false): void {
   e.at(t, () => e.emit('tech_release', e.handsMid(A), e.dirBetween(A, D), big ? 1 : 0.6, A.team, D.team, { sub: el }));
@@ -105,19 +111,30 @@ const razorHalo: TechDef = {
 };
 
 const dragonFist: TechDef = {
-  name: 'Dragon Fist', element: 'gold', lead: 3,
+  name: 'Dragon Fist', element: 'gold', lead: 3, radius: 6,
   run(e, s, A, D) {
     e.stageTo(5, 2);
     title(e, A, D, s + 0.2, 'dragonFist');
     e.play(A, 'charge', s, 0.7);
     e.at(s, () => { A.charge = 1; A.auraBoost = 1; });
     e.at(s + 2, () => (A.charge = 0));
-    const drg = e.fx('orb', A, D, s + 0.5, s + 6, { variant: 'dragon', element: 'gold', attach: A, joint: J.rHand, size: 0.35, growBeats: 1.5 });
-    e.strike(A, D, 'sy_dragonFist', s + 3, 1, 'hit', { critical: true, damage: 16, element: 'gold', react: 'launched' });
-    e.at(s + 3, () => {
-      const p = D.joint(J.chest);
-      e.launchFx(drg, s + 3, s + 5.4, [p[0], p[1] + 9, p[2]], { side: 2.5, lift: 3 });
+    // A colossal dragon coils out of the fist, then surges through the target and up into the sky
+    const P = new Power(e, A, D, s, 'Dragon Fist', { type: 'dragonFist', intensity: 1, duration: 8, radius: 6, speed: 1, particleDensity: 1, colorProfile: 'gold', cameraProfile: 'wide' });
+    const rig = P.dragon();
+    e.at(s + 0.5, () => {
+      const h = A.joint(J.rHand);
+      rig.owner = A.team;
+      rig.element = A.form ?? 'gold';
+      rig.spawn(h[0], h[1], h[2], A.facing, 0.45);
+      rig.formRate = 4 / (1.8 * e.spb);
+      rig.formTarget = 4;
+      rig.mode = 'coil';
+      rig.cx = A.x; rig.cz = A.z; rig.cy = 1.8; rig.radius = 1.8; rig.angVel = 3; rig.speed = 9;
     });
+    e.strike(A, D, A.arch.id === 'saiyan' ? 'sy_dragonFist' : 'chargedPunch', s + 3, 1, 'hit', { critical: true, damage: 16, element: 'gold', react: 'launched' });
+    P.dive(rig, s + 3, 0.5, D, 10);
+    P.impact(s + 3);
+    e.at(s + 5.5, () => rig.dismiss());
     return 8;
   },
 };
@@ -884,4 +901,5 @@ export const TECHNIQUES: Record<TechId, TechDef> = {
   crimsonPiler, heronDance, bloodflameBlade, bloodIai, houndStep, scarletBloom,
   trueCharged, helmBreaker, ampedDischarge, bigBang, vaultingGlaive, wyvernfire,
   gateBarrage, heavenChains, swordOfLight, orbitBlades, piercingLance, rainOfSwords,
+  ...SUPERS, ...ULTRAS,
 };

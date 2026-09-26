@@ -157,7 +157,13 @@ export type PhraseKind =
   | 'grapple'
   | 'super'
   | 'ultra'
-  | 'finisher';
+  | 'finisher'
+  /** Weapon thrown or planted, fists in the middle, weapon called back (or formed mid-combo) */
+  | 'hybrid'
+  /** Speedster vocabulary: flash steps, multi-strikes, phantom assaults, velocity breaks */
+  | 'speed_blitz'
+  /** A flurry: a blur of blows on sixteenth notes, a guard that breaks, a launcher on the downbeat */
+  | 'rush';
 
 export type CombatEventType =
   | 'phrase'
@@ -195,15 +201,32 @@ export type CombatEventType =
   | 'summon_launch'
   | 'summon_impact'
   | 'summon_split'
-  | 'tech_charge'
   | 'tech_release'
   | 'tech_hit'
-  | 'ultra_start'
   | 'teleport'
   | 'transform'
   | 'lock'
   /** A strike has started its wind-up: `beats` until impact, `intensity` its weight */
-  | 'windup';
+  | 'windup'
+  // ---- supermoves (local / medium area): started → charge → released → impact
+  | 'super_started'
+  | 'super_charge'
+  | 'super_released'
+  | 'super_impact'
+  // ---- ultramoves (arena scale): started → formation → peak → impact → aftermath
+  | 'ultra_started'
+  | 'ultra_formation'
+  | 'ultra_peak'
+  | 'ultra_impact'
+  | 'ultra_aftermath'
+  // ---- weapon ↔ hand-to-hand transitions
+  | 'weapon_release'
+  | 'weapon_recall'
+  | 'weapon_manifest'
+  // ---- speed
+  | 'speed_dash'
+  | 'velocity_break'
+  | 'perfect_dodge';
 
 export interface CombatEvent {
   type: CombatEventType;
@@ -222,4 +245,6 @@ export interface CombatEvent {
   beats?: number;
   label?: string;
   sub?: string;
+  /** Area the moment covers (metres): lets the camera pull back far enough to show its scale */
+  radius?: number;
 }

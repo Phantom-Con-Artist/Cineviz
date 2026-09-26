@@ -1,5 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { EngineBridge } from '../../engine/EngineBridge';
+import { ROSTER } from '../../content/roster';
+import type { ArchetypeId } from '../../engine/simulation/combat/Archetypes';
 
 interface CinematicOverlayProps {
   bridge: EngineBridge | null;
@@ -48,6 +50,13 @@ export const CinematicOverlay: React.FC<CinematicOverlayProps> = ({ bridge, reco
   const title = useRef<HTMLDivElement>(null);
   const sub = useRef<HTMLDivElement>(null);
   const caption = useRef<HTMLDivElement>(null);
+  const combo = useRef<HTMLDivElement>(null);
+  const comboNum = useRef<HTMLSpanElement>(null);
+  const card = useRef<HTMLDivElement>(null);
+  const cardA = useRef<HTMLDivElement>(null);
+  const cardB = useRef<HTMLDivElement>(null);
+  const cardVs = useRef<HTMLDivElement>(null);
+  const cardKind = useRef<HTMLSpanElement>(null);
   const rec = useRef(recording);
   rec.current = recording;
 
@@ -56,8 +65,59 @@ export const CinematicOverlay: React.FC<CinematicOverlayProps> = ({ bridge, reco
     let raf = 0;
     let shown = '';
     let frame = 0;
+    // Title card: shown once when a show starts from its intro
+    let cardAt = -1;
+    let cardKey = '';
     const loop = () => {
       const d = bridge.director;
+      const eng = bridge.combat;
+      const pal = bridge.palette;
+      // Combo counter: pops on every connected blow, on the attacker's side of the frame
+      if (combo.current && comboNum.current) {
+        const c = d.combo;
+        const since = d.now - c.last;
+        const vis = c.count >= 3 ? Math.max(0, Math.min(1, (2.2 - since) / 0.5)) : 0;
+        combo.current.style.opacity = String(vis);
+        if (vis > 0) {
+          const pop = Math.max(0, 1 - (d.now - c.pop) / 0.22);
+          const col = c.team === 0 ? pal.a.aura : pal.b.aura;
+          if (comboNum.current.textContent !== String(c.count)) comboNum.current.textContent = String(c.count);
+          combo.current.style.color = col;
+          combo.current.style.left = c.team === 0 ? '5%' : '';
+          combo.current.style.right = c.team === 0 ? '' : '5%';
+          combo.current.style.textAlign = c.team === 0 ? 'left' : 'right';
+          combo.current.style.transform = `skewX(-12deg) scale(${1 + pop * 0.35 + Math.min(0.5, c.count * 0.012)})`;
+          combo.current.style.transformOrigin = c.team === 0 ? 'left center' : 'right center';
+          combo.current.style.textShadow = `0 0 ${10 + pop * 22}px ${col}, 0 2px 0 rgba(0,0,0,0.6)`;
+        }
+      }
+      // VS card over the opening of a show
+      if (card.current && cardA.current && cardB.current && cardVs.current) {
+        const intro = eng.running && bridge.audio.isPlaying() && bridge.getMusicState().time > 0.8 && bridge.getMusicState().time < 8;
+        const key = `${pal.name}|${eng.fighters[0].arch.id}|${eng.fighters[1].arch.id}`;
+        if (intro && cardAt < 0 && key !== cardKey) {
+          cardAt = performance.now();
+          cardKey = key;
+          const [a, b] = [eng.fighters[0].arch.id, eng.fighters[1].arch.id].map((id) => ROSTER[id as ArchetypeId]);
+          cardA.current.innerHTML = `<div style="font-size:clamp(18px,3.4vw,44px);letter-spacing:.08em;color:#fff">${a!.name.toUpperCase()}</div><div style="font-size:clamp(8px,.9vw,12px);letter-spacing:.35em;color:${pal.a.aura}">${a!.title.toUpperCase()}</div>`;
+          cardB.current.innerHTML = `<div style="font-size:clamp(18px,3.4vw,44px);letter-spacing:.08em;color:#fff">${b!.name.toUpperCase()}</div><div style="font-size:clamp(8px,.9vw,12px);letter-spacing:.35em;color:${pal.b.aura}">${b!.title.toUpperCase()}</div>`;
+          if (cardKind.current) cardKind.current.textContent = eng.flavor.name;
+          cardA.current.style.textShadow = `0 0 24px ${pal.a.aura}`;
+          cardB.current.style.textShadow = `0 0 24px ${pal.b.aura}`;
+        }
+        if (!eng.running) cardKey = '';
+        const t = cardAt >= 0 ? (performance.now() - cardAt) / 1000 : 99;
+        if (t > 4.6) cardAt = -1;
+        const inn = Math.min(1, t / 0.45);
+        const ease = 1 - Math.pow(1 - inn, 3);
+        const out = Math.max(0, Math.min(1, (4.4 - t) / 0.6));
+        const drift = t * 6;
+        card.current.style.opacity = String(t < 4.6 ? out : 0);
+        cardA.current.style.transform = `translateX(${(1 - ease) * -60 - drift}vw) skewX(-10deg)`;
+        cardB.current.style.transform = `translateX(${(1 - ease) * 60 + drift}vw) skewX(-10deg)`;
+        cardVs.current.style.transform = `scale(${t < 0.5 ? 2.4 - t * 2.8 : 1 + Math.max(0, 0.05 - (t - 0.5) * 0.1)})`;
+        cardVs.current.style.opacity = String(Math.min(1, Math.max(0, (t - 0.3) / 0.2)));
+      }
       const lb = d.letterbox * 11;
       if (top.current) top.current.style.height = `${lb}%`;
       if (bottom.current) bottom.current.style.height = `${lb}%`;
@@ -127,6 +187,22 @@ export const CinematicOverlay: React.FC<CinematicOverlayProps> = ({ bridge, reco
       {/* Technique subtitle, sitting in the lower letterbox bar */}
       <div className="absolute inset-x-0 bottom-[3.5%] flex justify-center">
         <div ref={caption} className="font-mono uppercase text-[10px] sm:text-xs text-white/80 opacity-0" style={{ textShadow: '0 0 12px rgba(255,255,255,0.35)' }} />
+      </div>
+
+      {/* Combo counter */}
+      <div ref={combo} className="absolute top-[26%] font-mono italic leading-none opacity-0" style={{ willChange: 'transform, opacity' }}>
+        <span ref={comboNum} className="block text-[clamp(28px,5vw,64px)] font-black tabular-nums" />
+        <span className="block text-[clamp(8px,0.9vw,12px)] tracking-[0.45em] text-white/85 not-italic">HITS</span>
+      </div>
+
+      {/* VS title card */}
+      <div ref={card} className="absolute inset-0 flex flex-col items-center justify-center gap-[2vh] font-mono opacity-0" style={{ background: 'linear-gradient(180deg, transparent 30%, rgba(0,0,0,0.55) 50%, transparent 70%)' }}>
+        <div ref={cardA} className="self-start pl-[12%] text-left" />
+        <div ref={cardVs} className="flex flex-col items-center gap-1">
+          <span className="text-[clamp(14px,2vw,26px)] tracking-[0.5em] text-white/90 italic" style={{ textShadow: '0 0 18px rgba(255,255,255,0.6)' }}>VS</span>
+          <span ref={cardKind} className="text-[clamp(7px,0.8vw,10px)] tracking-[0.5em] text-rose-300/90" />
+        </div>
+        <div ref={cardB} className="self-end pr-[12%] text-right" />
       </div>
 
       {/* Before / after the show */}

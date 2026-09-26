@@ -1,4 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { ROSTER } from '../../content/roster';
+import type { ArchetypeId } from '../../engine/simulation/combat/Archetypes';
 import { EngineBridge } from '../../engine/EngineBridge';
 import { DirectorState } from '../../engine/director/Director';
 
@@ -38,6 +40,10 @@ interface MobileShellProps {
   exporting: boolean;
   directorOpen: boolean;
   onDirector: () => void;
+  /** The cast overlay (RosterPanel) */
+  cast: React.ReactNode;
+  castOpen: boolean;
+  onCast: () => void;
   onPlayPause: () => void;
   onExport: () => void;
   sampleTracks: { title: string; url: string }[];
@@ -99,7 +105,7 @@ export const MobileShell: React.FC<MobileShellProps> = (p) => {
           {/* Title strip */}
           <div className={`absolute top-0 inset-x-0 z-20 flex items-center gap-3 px-3 pt-2 pb-6 text-[10px] tracking-[0.2em] bg-gradient-to-b from-black/70 to-transparent pointer-events-none transition-opacity duration-500 ${shown ? 'opacity-100' : 'opacity-0'}`}>
             <span className="text-slate-100 tracking-[0.3em]"><span className="inline-block w-1.5 h-1.5 mr-1.5 rounded-full bg-rose-500 align-middle" />CINEVIZ</span>
-            <span className="truncate text-slate-400">{p.matchup[0].toUpperCase()} vs {p.matchup[1].toUpperCase()}</span>
+            <span className="truncate text-slate-400">{(ROSTER[p.matchup[0] as ArchetypeId]?.name ?? p.matchup[0]).toUpperCase()} vs {(ROSTER[p.matchup[1] as ArchetypeId]?.name ?? p.matchup[1]).toUpperCase()}</span>
             <span className="ml-auto truncate text-slate-500 max-w-[40%]">{p.trackTitle ?? ''}</span>
           </div>
           {/* Director read-out: one line (the phone's monitor HUD) */}
@@ -135,6 +141,9 @@ export const MobileShell: React.FC<MobileShellProps> = (p) => {
           <RailButton label="TRACK" on={sheet === 'track'} onClick={() => setSheet(sheet === 'track' ? null : 'track')} disabled={p.locked}>
             <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg>
           </RailButton>
+          <RailButton label="CAST" on={p.castOpen} onClick={p.onCast}>
+            <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="9" cy="8" r="3.2" /><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6" /><circle cx="17" cy="9" r="2.4" /><path d="M16 14.2c2.8.3 5 2.6 5 5.8" /></svg>
+          </RailButton>
           <RailButton label="CAM" on={p.directorOpen} onClick={p.onDirector}>
             <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="7" width="14" height="11" rx="1" /><path d="M16 11l6-3v9l-6-3z" /></svg>
           </RailButton>
@@ -143,6 +152,8 @@ export const MobileShell: React.FC<MobileShellProps> = (p) => {
           </RailButton>
         </nav>
       </div>
+
+      {p.castOpen && <div className="absolute top-0 bottom-0 left-0 right-[72px] z-40">{p.cast}</div>}
 
       {/* Sheets slide in from the right, over the picture */}
       <div

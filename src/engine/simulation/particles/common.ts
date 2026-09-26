@@ -107,8 +107,36 @@ export class FxPool {
     this.bounce[i] = bounce;
   }
 
+  /** Fields acting on the free particles during the next update: x, y, z, radius, strength (> 0 pulls in, < 0 pushes away) */
+  private readonly forces = new Float32Array(12 * 5);
+  private nForces = 0;
+
+  force(x: number, y: number, z: number, r: number, k: number): void {
+    if (this.nForces >= 12) return;
+    this.forces.set([x, y, z, r, k], this.nForces++ * 5);
+  }
+
+  /** A blast: every live particle within r is kicked away from the point (s m/s at the centre) */
+  impulse(x: number, y: number, z: number, r: number, s: number): void {
+    const r2 = r * r;
+    for (let i = 0; i < this.n; i++) {
+      if (this.life[i]! <= 0) continue;
+      const dx = this.px[i]! - x, dy = this.py[i]! - y, dz = this.pz[i]! - z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > r2 || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const k = (s * (1 - d / r)) / d;
+      this.vx[i] += dx * k;
+      this.vy[i] += dy * k * 0.7 + s * 0.15 * (1 - d / r);
+      this.vz[i] += dz * k;
+    }
+  }
+
   update(dt: number, o: Out, lines?: { pos: Float32Array; col: Float32Array }): void {
     let alive = 0;
+    const nf = this.nForces;
+    const F = this.forces;
+    this.nForces = 0;
     for (let i = 0; i < this.n; i++) {
       const k = this.off + i;
       if (this.life[i] <= 0) {
@@ -120,6 +148,18 @@ export class FxPool {
       }
       alive++;
       this.life[i] -= dt;
+      for (let f = 0; f < nf; f++) {
+        const q = f * 5;
+        const dx = F[q]! - this.px[i]!, dy = F[q + 1]! - this.py[i]!, dz = F[q + 2]! - this.pz[i]!;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        const r = F[q + 3]!;
+        if (d2 > r * r || d2 < 1e-4) continue;
+        const dd = Math.sqrt(d2);
+        const a = (F[q + 4]! * (1 - dd / r) * dt) / dd;
+        this.vx[i] += dx * a;
+        this.vy[i] += dy * a;
+        this.vz[i] += dz * a;
+      }
       const d = Math.exp(-this.drag[i] * dt);
       this.vx[i] *= d;
       this.vy[i] = this.vy[i] * d - this.grav[i] * dt;

@@ -70,5 +70,55 @@ export const STANCE = {
     rShP: 0.8, rShA: 0.1, rEl: 0.75, lShP: 1.3, lShA: -0.2, lEl: 0.5,
     lHipP: 0.5, lHipA: 0.2, lKn: 0.55, rHipP: -0.45, rHipA: 0.15, rKn: 0.45,
   }),
+
+  // ---------------------------------------------------------------- weapon-set stances
+  // Fencer: side-on, point levelled, rear hand raised behind for balance
+  fencer: makePose(null, {
+    lean: 0.05, twist: -0.55, head: 0.05,
+    rShP: 1.35, rShA: 0.05, rEl: 0.35, lShP: 1.9, lShA: 0.7, lEl: 1.6,
+    lHipP: 0.25, lHipA: 0.1, lKn: 0.45, rHipP: -0.3, rHipA: 0.25, rKn: 0.5,
+  }),
+  // Two blades: both hands forward, one high one low
+  dual: makePose(null, {
+    lean: 0.2, twist: 0.2, head: 0.05,
+    rShP: 0.9, rShA: 0.4, rEl: 1.0, lShP: 1.4, lShA: 0.2, lEl: 1.3,
+    lHipP: 0.45, lHipA: 0.2, lKn: 0.7, rHipP: -0.3, rHipA: 0.2, rKn: 0.6,
+  }),
+  // Shield forward on the left arm, weapon cocked behind it
+  shield: makePose(null, {
+    lean: 0.18, twist: 0.45, head: 0.12,
+    lShP: 1.35, lShA: -0.3, lEl: 1.55, rShP: 0.9, rShA: 0.35, rEl: 1.5,
+    lHipP: 0.5, lHipA: 0.15, lKn: 0.65, rHipP: -0.35, rHipA: 0.15, rKn: 0.55,
+  }),
+  // Archer: bow low in the left hand, arrow hand at the hip, weight back
+  archer: makePose(null, {
+    lean: 0.02, twist: -0.6, head: 0.05,
+    lShP: 0.9, lShA: 0.15, lEl: 0.3, rShP: 0.2, rShA: 0.2, rEl: 1.3,
+    lHipP: 0.25, lHipA: 0.2, lKn: 0.35, rHipP: -0.25, rHipA: 0.2, rKn: 0.45,
+  }),
+  // Heavy head resting low: axes, hammers, maces
+  heavy: makePose(null, {
+    lean: 0.22, twist: 0.4, head: 0.05,
+    rShP: 0.55, rShA: 0.2, rEl: 0.6, lShP: 0.6, lShA: -0.35, lEl: 0.8,
+    lHipP: 0.5, lHipA: 0.25, lKn: 0.7, rHipP: -0.4, rHipA: 0.25, rKn: 0.6,
+  }),
+  // Long shaft held high and diagonal: halberds, glaives, scythes
+  polearm: makePose(null, {
+    lean: 0.12, twist: 0.5, head: 0.05,
+    rShP: 1.5, rShA: 0.2, rEl: 1.2, lShP: 1.1, lShA: -0.3, lEl: 0.6,
+    lHipP: 0.5, lHipA: 0.2, lKn: 0.6, rHipP: -0.45, rHipA: 0.2, rKn: 0.5,
+  }),
+  // Chain weapons: the free length swinging from a low hand, the other arm guarding
+  chain: makePose(null, {
+    lean: 0.15, twist: 0.3, head: 0.05,
+    rShP: 0.5, rShA: 0.5, rEl: 0.5, lShP: 1.2, lShA: 0.1, lEl: 1.8,
+    lHipP: 0.4, lHipA: 0.2, lKn: 0.55, rHipP: -0.3, rHipA: 0.2, rKn: 0.5,
+  }),
+  // Caster: upright, hands open and low — the floating weapons do the guarding
+  caster: makePose(null, {
+    lean: -0.02, twist: 0.15, head: 0.12,
+    lShP: 0.35, lShA: 0.45, lEl: 0.5, rShP: 0.4, rShA: 0.45, rEl: 0.45,
+    lHipP: 0.18, lHipA: 0.12, lKn: 0.2, rHipP: -0.12, rHipA: 0.12, rKn: 0.15,
+  }),
 };
 export type StanceName = keyof typeof STANCE;

@@ -48,6 +48,13 @@ export interface MusicState {
   /** True on frames where a transient (onset) was detected */
   onset: boolean;
   onsetStrength: number;
+  /** True on frames where a kick drum hits (low-band flux transient) */
+  kick: boolean;
+  kickStrength: number;
+  /** Kick envelope: jumps to the kick's strength and decays over ~0.25 s [0.0 - 1.0] */
+  pulse: number;
+  /** Bass level smoothed for visuals (slow attack-free follower) [0.0 - 1.0] */
+  bassSmooth: number;
   /** Current active musical section label */
   section: MusicSectionType;
   /** True when the beat grid comes from offline analysis of the whole track */

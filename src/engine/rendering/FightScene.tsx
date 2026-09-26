@@ -3,7 +3,8 @@ import * as THREE from 'three';
 import { useFrame, useThree } from '@react-three/fiber';
 import { EngineBridge } from '../EngineBridge';
 import { CameraMode } from '../../types/engine';
-import { createFloorMaterial, createParticleMaterials, createRockMaterial, createSkyMaterial } from './shaders/fightShaders';
+import { createFloorMaterial, createMoteMaterial, createParticleMaterials, createRockMaterial, createSkyMaterial } from './shaders/fightShaders';
+import { elemCols } from '../simulation/particles/common';
 
 interface FightSceneProps {
   bridge: EngineBridge;
@@ -68,6 +69,24 @@ function buildRocks(): THREE.BufferGeometry {
     aRand: [Float32Array.from(rnd), 1],
     aRock: [Float32Array.from(rock), 1],
   });
+}
+
+/** Motes hanging in the air over the whole arena (relative to the fight's centre) */
+function buildMotes(): THREE.BufferGeometry {
+  const n = 3200;
+  const pos = new Float32Array(n * 3);
+  const r1 = new Float32Array(n);
+  const r2 = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = 1.5 + Math.pow(Math.random(), 0.7) * 20;
+    pos[i * 3] = Math.cos(a) * r;
+    pos[i * 3 + 1] = 0.2 + Math.pow(Math.random(), 1.6) * 9;
+    pos[i * 3 + 2] = Math.sin(a) * r;
+    r1[i] = Math.random();
+    r2[i] = Math.random();
+  }
+  return geometry({ position: [pos, 3], aRand: [r1, 1], aRand2: [r2, 1] });
 }
 
 /** Stars, a huge anime moon, and bokeh */
@@ -142,6 +161,8 @@ export const FightScene: React.FC<FightSceneProps> = ({ bridge, cameraMode }) =>
     [ps],
   );
   const lines = useMemo(() => geometry({ position: [ps.linePositions, 3], color: [ps.lineColors, 3] }, true), [ps]);
+  const bolts = useMemo(() => geometry({ position: [ps.lightning.positions, 3], color: [ps.lightning.colors, 3] }, true), [ps]);
+  const motes = useMemo(buildMotes, []);
   const floor = useMemo(buildFloor, []);
   const rocks = useMemo(buildRocks, []);
   const sky = useMemo(buildSky, []);
@@ -152,6 +173,8 @@ export const FightScene: React.FC<FightSceneProps> = ({ bridge, cameraMode }) =>
       main,
       glow,
       lines: new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }),
+      bolts: new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }),
+      motes: createMoteMaterial(),
       floor: createFloorMaterial(),
       rocks: createRockMaterial(),
       stars: createSkyMaterial(0.2),
@@ -159,7 +182,7 @@ export const FightScene: React.FC<FightSceneProps> = ({ bridge, cameraMode }) =>
     };
   }, []);
 
-  useEffect(() => () => [dyn, lines, floor, rocks, sky.far, sky.bokeh].forEach((g) => g.dispose()), [dyn, lines, floor, rocks, sky]);
+  useEffect(() => () => [dyn, lines, bolts, motes, floor, rocks, sky.far, sky.bokeh].forEach((g) => g.dispose()), [dyn, lines, bolts, motes, floor, rocks, sky]);
   useEffect(() => () => Object.values(mats).forEach((m) => m.dispose()), [mats]);
   useEffect(() => bridge.setCameraMode(cameraMode), [bridge, cameraMode]);
 
@@ -169,13 +192,17 @@ export const FightScene: React.FC<FightSceneProps> = ({ bridge, cameraMode }) =>
     for (const name of ['position', 'aColor', 'aSize', 'aAlpha']) dyn.getAttribute(name).needsUpdate = true;
     lines.getAttribute('position').needsUpdate = true;
     lines.getAttribute('color').needsUpdate = true;
+    bolts.getAttribute('position').needsUpdate = true;
+    bolts.getAttribute('color').needsUpdate = true;
+    const d0 = bridge.director;
+    ps.cam[0] = d0.camPos.x; ps.cam[1] = d0.camPos.y; ps.cam[2] = d0.camPos.z;
 
     const pr = state.gl.getPixelRatio();
     const scale = Math.max(8, size.height * 0.022);
     const simT = ps.simTime;
     const music = bridge.getMusicState();
     const pal = bridge.palette;
-    for (const m of [mats.main, mats.floor, mats.rocks, mats.stars, mats.bokeh]) {
+    for (const m of [mats.main, mats.floor, mats.rocks, mats.stars, mats.bokeh, mats.motes]) {
       m.uniforms.uPixelRatio!.value = pr;
       m.uniforms.uScale!.value = scale;
     }
@@ -183,6 +210,7 @@ export const FightScene: React.FC<FightSceneProps> = ({ bridge, cameraMode }) =>
     mats.stars.uniforms.uTime!.value = state.clock.elapsedTime;
     mats.bokeh.uniforms.uTime!.value = state.clock.elapsedTime;
     mats.rocks.uniforms.uTime!.value = simT;
+    mats.motes.uniforms.uTime!.value = simT;
 
     const fu = mats.floor.uniforms;
     fu.uTime!.value = simT;
@@ -197,15 +225,48 @@ export const FightScene: React.FC<FightSceneProps> = ({ bridge, cameraMode }) =>
       lc[i]!.setRGB(a[0] * k, a[1] * k, a[2] * k);
     });
     (fu.uBase!.value as THREE.Color).set(pal.floor).multiplyScalar(0.5);
-    fu.uBass!.value = music.bass * music.intensity;
+    fu.uBass!.value = music.bassSmooth * music.intensity;
     fu.uGlow!.value = music.energy;
+    fu.uPulse!.value = music.pulse;
+    // The arena as a participant: light, colour, cracks, trench, warp
+    const ar = bridge.combat.arena;
+    fu.uDim!.value = ar.dim;
+    fu.uFlash!.value = ar.flash;
+    const [tc] = elemCols(ar.tintEl ?? undefined, ps.teamColors[bridge.combat.attacker] ?? ps.teamColors[0]!);
+    (fu.uTint!.value as THREE.Color).setRGB(tc[0] * (ar.tint * 0.6 + ar.crackGlow * 0.6 + ar.trenchGlow * 0.6), tc[1] * (ar.tint * 0.6 + ar.crackGlow * 0.6 + ar.trenchGlow * 0.6), tc[2] * (ar.tint * 0.6 + ar.crackGlow * 0.6 + ar.trenchGlow * 0.6));
+    (fu.uCrack!.value as THREE.Vector4).set(ar.crackX, ar.crackZ, ar.crackR, ar.crackGlow);
+    (fu.uTrench!.value as THREE.Vector4).set(ar.tx0, ar.tz0, ar.tx1, ar.tz1);
+    (fu.uTrenchK!.value as THREE.Vector2).set(ar.trench, ar.trenchGlow);
+    (fu.uWarp!.value as THREE.Vector3).set(ar.warpX, ar.warpZ, ar.warp);
+    // Motes: react to kicks, bass, bodies and shockwaves
+    const mu = mats.motes.uniforms;
+    mu.uPulse!.value = music.pulse;
+    mu.uBass!.value = music.bassSmooth * music.intensity;
+    mu.uDim!.value = ar.dim;
+    (mu.uColA!.value as THREE.Color).setRGB(ps.teamAura[0][0] * 0.6 + 0.3, ps.teamAura[0][1] * 0.6 + 0.3, ps.teamAura[0][2] * 0.6 + 0.3);
+    (mu.uColB!.value as THREE.Color).setRGB(ps.teamAura[1][0] * 0.6 + 0.3, ps.teamAura[1][1] * 0.6 + 0.3, ps.teamAura[1][2] * 0.6 + 0.3);
+    const eng = bridge.combat;
+    (mu.uCenter!.value as THREE.Vector2).set(eng.stage.cx, eng.stage.cz);
+    const acts = mu.uActors!.value as THREE.Vector4[];
+    const actors = [eng.fighters[0], eng.fighters[1]];
+    for (let i = 0; i < 8; i++) {
+      const a = actors[i];
+      if (a && a.active && (!('present' in a) || a.present)) acts[i]!.set(a.x, 1, a.z, 0.4 + Math.min(1.5, a.speed / 6));
+      else acts[i]!.set(0, -99, 0, 0);
+    }
+    const mr = mu.uRipples!.value as THREE.Vector4[];
+    for (let i = 0; i < 8; i++) mr[i]!.copy(rip[i]!);
 
     mats.rocks.uniforms.uLevitate!.value = ps.levitate;
+    mats.rocks.uniforms.uPulse!.value = music.pulse;
+    mats.rocks.uniforms.uDim!.value = ar.dim;
     (mats.rocks.uniforms.uTint!.value as THREE.Color).set(pal.sky);
     for (const m of [mats.stars, mats.bokeh]) {
       (m.uniforms.uSky!.value as THREE.Color).set(pal.sky);
       (m.uniforms.uMoon!.value as THREE.Color).set(pal.moon);
-      m.uniforms.uPulse!.value = Math.pow(1 - music.beatPhase, 3) * music.beatStrength * music.intensity;
+      m.uniforms.uPulse!.value = Math.pow(1 - music.beatPhase, 3) * music.beatStrength * music.intensity + music.pulse * 0.6;
+      m.uniforms.uDim!.value = ar.dim;
+      m.uniforms.uFlash!.value = ar.flash;
     }
 
     bridge.director.aspect = size.width / Math.max(1, size.height);
@@ -239,6 +300,8 @@ export const FightScene: React.FC<FightSceneProps> = ({ bridge, cameraMode }) =>
       <points geometry={sky.bokeh} material={mats.bokeh} frustumCulled={false} renderOrder={1} />
       <points geometry={floor} material={mats.floor} frustumCulled={false} renderOrder={2} />
       <points geometry={rocks} material={mats.rocks} frustumCulled={false} renderOrder={3} />
+      <points geometry={motes} material={mats.motes} frustumCulled={false} renderOrder={3} />
+      <lineSegments geometry={bolts} material={mats.bolts} frustumCulled={false} renderOrder={5} />
       <points geometry={dyn} material={mats.glow} frustumCulled={false} renderOrder={4} />
       <lineSegments geometry={lines} material={mats.lines} frustumCulled={false} renderOrder={5} />
       <points geometry={dyn} material={mats.main} frustumCulled={false} renderOrder={6} />

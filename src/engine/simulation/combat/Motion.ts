@@ -153,14 +153,31 @@ export class MotionBody {
     this.setProfile(DEFAULT_PROFILE);
   }
 
+  /**
+   * Weight of what the hands carry (0 = bare, 1 = a sword, 2.6 = a great axe). A heavy
+   * weapon slows the arms more than the body, deepens the torso's follow-through and
+   * makes the recoil of a blocked blow bigger.
+   */
+  load = 0;
+
+  setLoad(mass: number): void {
+    if (Math.abs(mass - this.load) < 1e-3) return;
+    this.load = mass;
+    this.setProfile(this.profile);
+  }
+
   setProfile(p: MotionProfile): void {
     this.profile = p;
     const wScale = (p.stiffness * p.reactionSpeed) / Math.sqrt(p.mass);
     const zScale = clamp(p.damping * (1 - 0.12 * (p.inertia - 1)), 0.6, 1.15);
+    // Arms carry the weapon: their springs soften with its mass; the torso a little
+    const armW = 1 / Math.sqrt(1 + this.load * 0.32);
+    const torsoW = 1 / Math.sqrt(1 + this.load * 0.08);
     for (let i = 0; i < PARAM_COUNT; i++) {
       const rot = ANGLE.has(i);
-      this.w[i] = OMEGA[i]! * (rot ? 1 : wScale);
-      this.z[i] = rot ? 1 : clamp(ZETA[i]! * zScale, 0.4, 1.2);
+      const carry = i >= P.lShP && i <= P.rEl ? armW : i === P.lean || i === P.twist ? torsoW : 1;
+      this.w[i] = OMEGA[i]! * (rot ? 1 : wScale * carry);
+      this.z[i] = rot ? 1 : clamp(ZETA[i]! * zScale * (i === P.twist ? 1 - Math.min(0.15, this.load * 0.05) : 1), 0.4, 1.2);
     }
     // Head start needed so the hand still lands on the beat despite spring lag, plus the chain offsets
     const sum = new Float32Array(GROUPS);
@@ -199,6 +216,7 @@ export class MotionBody {
   }
 
   copyFrom(o: MotionBody): void {
+    this.load = o.load;
     this.setProfile(o.profile);
     this.variation = o.variation;
     this.snap(o.body);
@@ -322,7 +340,7 @@ export class MotionBody {
       this.cvx += 0.5 * k / p.balance;
       return;
     }
-    const k = (pw * (kind === 'block' ? 2 : 1)) / Math.sqrt(p.mass);
+    const k = (pw * (kind === 'block' ? 2 : 1) * (1 + this.load * 0.15)) / Math.sqrt(p.mass);
     this.kickPeak(P.lean, -0.05 * k);
     this.kickPeak(P.rootX, -0.03 * k);
     this.kickPeak(P.lShP, -0.06 * k);

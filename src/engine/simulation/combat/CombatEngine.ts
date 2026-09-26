@@ -1,15 +1,21 @@
 import { CombatEvent, CombatEventType, PhraseKind, Vector3Tuple } from '../../../types/cinematic';
 import { MusicState } from '../../../types/music';
+import { FightFlavor, FLAVORS } from './Flavors';
 import { SeededRandom } from '../../../utils/random';
 import { clamp, damp, dampAngle, smoothstep, wobble, wrapAngle } from '../../../utils/math';
 import { DEFAULT_DIMS, DEFAULT_PROPORTIONS, Dims, dimsOf, FRAME_STRIDE, J, JOINT_COUNT, P, PARAM_COUNT, Proportions, SEG_COUNT, solvePose } from './Skeleton';
 import { Element, MOVES, MoveDef, MoveInstance, MoveName, reachOf, SLASHES, STANCE, StanceName, Zone } from './Moves';
-import { Pet, PET_KINDS, Summon, SUMMON_KINDS, SUMMON_STYLE, SummonKind } from './Entities';
+import { Pet, PET_KINDS, Summon, SUMMON_STYLE, SummonKind } from './Entities';
 import { Archetype, ArchetypeId, ARCHETYPE_IDS, ARCHETYPES, TechId, WEAPON_LENGTH, WeaponType } from './Archetypes';
 import { FxAnchor, FxKind, TechFx } from './TechFx';
 import { TECHNIQUES } from './Techniques';
 import { DEFAULT_PROFILE, MotionBody, PROFILES } from './Motion';
 import { BUILDS } from '../figure/Builds';
+import { setOfForm, vocabulary, Vocabulary, weaponSet, WeaponSet, WEAPON_SETS } from './weapons/Arsenal';
+import { Armory } from './powers/Armory';
+import { DragonRig } from './powers/Dragon';
+import { ArenaState } from './powers/Arena';
+import { buildLoadout } from './powers/Loadout';
 
 export type { WeaponType } from './Archetypes';
 export { WEAPON_LENGTH } from './Archetypes';
@@ -69,6 +75,42 @@ export type FxOpts = Partial<Pick<TechFx,
   'variant' | 'element' | 'attach' | 'joint' | 'ofF' | 'ofU' | 'ofR' | 'size' | 'size0' | 'growBeats' | 'growFrom'
   | 'homing' | 'homingJoint' | 'a' | 'b' | 'n' | 'tilt' | 't1' | 't2'>>;
 
+/**
+ * Extreme-speed movement: for its duration the actor's position follows this path
+ * exactly (no spring), straight from (x0, z0) to (x1, z1), or round a pivot from angle
+ * a0 through `arc` radians while the radius goes r0 → r1.
+ */
+export interface SpeedPath {
+  t0: number;
+  t1: number;
+  x0: number;
+  z0: number;
+  x1: number;
+  z1: number;
+  /** Pivot of an arc (arc = 0: straight line) */
+  cx: number;
+  cz: number;
+  a0: number;
+  arc: number;
+  r0: number;
+  r1: number;
+}
+
+/** A weapon out of its owner's hand: thrown end over end, planted in the floor, or flying back */
+export interface LooseWeapon {
+  mode: 'flight' | 'planted' | 'recall';
+  t0: number;
+  t1: number;
+  x0: number;
+  y0: number;
+  z0: number;
+  x1: number;
+  y1: number;
+  z1: number;
+  /** Flight arc height */
+  lift: number;
+}
+
 // ============================================================================ actors
 
 export class Actor {
@@ -127,6 +169,8 @@ export class Actor {
   gait = 0;
   /** Bumped by every reaction, so stale get-ups never fire */
   reactToken = 0;
+  /** Extreme-speed movement in progress */
+  path: SpeedPath | null = null;
 
   constructor(public team: number) {
     this.pose.set(STANCE.guard);
@@ -141,8 +185,8 @@ export class Actor {
   }
 
   /** Second-order follow of the stage position, facing and height (called by the engine) */
-  integrateBody(dt: number, gx: number, gz: number, want: number): boolean {
-    const teleported = this.x !== this.lastX || this.z !== this.lastZ;
+  integrateBody(dt: number, gx: number, gz: number, want: number, fixed = false): boolean {
+    const teleported = !fixed && (this.x !== this.lastX || this.z !== this.lastZ);
     if (teleported) this.vx = this.vz = 0;
     if (this.facing !== this.lastFacing) this.facingVel = 0;
     const prof = this.motion.profile;
@@ -158,10 +202,12 @@ export class Actor {
     const wa = this.airRate * 1.4;
     this.landing = 0;
     for (let s = 0; s < n; s++) {
-      this.vx += (A * (gx - this.x) - D * this.vx) * h;
-      this.vz += (A * (gz - this.z) - D * this.vz) * h;
-      this.x += this.vx * h;
-      this.z += this.vz * h;
+      if (!fixed) {
+        this.vx += (A * (gx - this.x) - D * this.vx) * h;
+        this.vz += (A * (gz - this.z) - D * this.vz) * h;
+        this.x += this.vx * h;
+        this.z += this.vz * h;
+      }
       const err = wrapAngle(want - this.facing);
       this.facingVel = Math.max(-16, Math.min(16, this.facingVel + (wf * wf * err - 1.9 * wf * this.facingVel) * h));
       this.facing += this.facingVel * h;
@@ -178,6 +224,16 @@ export class Actor {
     this.lastZ = this.z;
     this.lastFacing = this.facing;
     return teleported;
+  }
+
+  /** Put the actor on a point of a speed path (its velocity is what the path implies) */
+  drive(x: number, z: number, dt: number): void {
+    if (dt > 0) {
+      this.vx = (x - this.x) / dt;
+      this.vz = (z - this.z) / dt;
+    }
+    this.x = this.lastX = x;
+    this.z = this.lastZ = z;
   }
 
   get base(): Float32Array {
@@ -227,11 +283,24 @@ export class Fighter extends Actor {
   bladeUntil = 0;
   ultraUsed = 0;
   recentTech: TechId[] = [];
+  /** This show's weapon (one of the 51 sets) and what it unlocks */
+  weaponSet: WeaponSet = WEAPON_SETS[0]!;
+  /** The set is the style's own signature weapon (its authored moves and stance apply) */
+  signature = false;
+  supers: TechId[] = [];
+  ultras: TechId[] = [];
+  /** The weapon is out of the hand (thrown, planted, flying back) */
+  loose: LooseWeapon | null = null;
+  /** Floating weapons: beat each slot was last fired (the slot re-forms after it) */
+  readonly floatFire = new Float32Array(12).fill(-99);
+  /** Transformed into something else (the dragon): the body is not drawn */
+  hidden = false;
 
   /** The archetype's own guard; armed styles fall back to a generic guard when disarmed */
   override get base(): Float32Array {
     const k = this.stanceKey;
     if (k === 'guard' || k === 'weapon') {
+      if (this.weaponOn && !this.signature) return STANCE[this.weaponSet.stance];
       if (this.arch.weapon) return STANCE[this.weaponOn ? this.arch.stance : 'guard'];
       return STANCE[this.weaponOn ? 'weapon' : this.arch.stance];
     }
@@ -240,6 +309,10 @@ export class Fighter extends Actor {
 
   get armed(): boolean {
     return this.weaponOn && !this.dead;
+  }
+
+  get vocab(): Vocabulary {
+    return vocabulary(this.weaponSet);
   }
 
   element(move?: MoveDef): Element {
@@ -251,6 +324,8 @@ export class Fighter extends Actor {
 export class Clone extends Actor {
   owner = 0;
   spawnBeat = 0;
+  /** A speed phantom (an afterimage that fights) rather than a shadow clone */
+  phantom = false;
 }
 
 export class Projectile {
@@ -301,8 +376,24 @@ const SUMMON_SCALE: Record<SummonKind, number> = {
   car: 1.25, plane: 1.2, building: 1, palm: 1.1, coconuts: 1, missiles: 1, sword: 1, hammer: 1, guitar: 1,
   meteor: 1.4, shark: 1.3, duck: 1.4, ufo: 1.3, torii: 1.2, colossus: 1, fist: 1,
 };
-/** Summons picked at random for the summon set piece (the rest belong to techniques) */
-const RANDOM_SUMMONS = SUMMON_KINDS.filter((k) => k !== 'colossus' && k !== 'fist');
+/**
+ * Summons picked at random for the summon set piece. Only the mythic ones: a falling
+ * meteor, a giant sword or war hammer, a gate crashing down. (The novelty shapes — cars,
+ * ducks, sharks, guitars — read as jokes next to the rest of the vocabulary, so the
+ * choreographer no longer reaches for them.)
+ */
+const RANDOM_SUMMONS: SummonKind[] = ['meteor', 'sword', 'hammer', 'torii'];
+/** Generic defensive moves any fighter mixes into their own */
+const GENERIC_DODGES: MoveName[] = ['backstep', 'sidestep', 'sidestepL', 'shoulderRoll', 'bobWeave', 'duck', 'sway'];
+/** Hand-to-hand combo grammar: open → build → finish */
+const OPENERS: MoveName[] = ['jab', 'feint', 'lowKick', 'bodyPunch', 'backfistSnap', 'jabR'];
+const BUILDERS: MoveName[] = ['cross', 'hook', 'overhand', 'uppercut', 'knee', 'roundhouse', 'elbow', 'bodyPunchR', 'hookR', 'risingElbow'];
+const FINISHERS: MoveName[] = ['spinKick', 'backKick', 'chargedPunch', 'lungePunch', 'flyingKick', 'axeKick', 'jumpKick', 'hammerFist', 'sideKick', 'legSweep'];
+const GRAPPLES: MoveName[] = ['shove', 'trip', 'tackle', 'shoulderCharge', 'grab'];
+/** Moves that never make contact (feints) */
+const NO_CONTACT = new Set<MoveName>(['feint']);
+/** Moves whose hit is delivered by a missile or a floating weapon */
+const RANGED_MOVES = new Set<MoveName>(['w_quickShot', 'w_drawLoose', 'w_aimFire', 'w_flickThrow', 'w_command', 'w_commandSweep']);
 const UP: Vector3Tuple = [0, 1, 0];
 const RECOVERIES: MoveName[] = ['getUp', 'kipUp', 'rollUp'];
 
@@ -332,7 +423,26 @@ export class CombatEngine {
   readonly struggle = new BeamStruggle();
   readonly lock = new Lock();
   readonly techFx: TechFx[] = Array.from({ length: 36 }, () => new TechFx());
+  /** Manifested weapons (arsenals, barrages, arrows, floating blades) as individual objects */
+  readonly armory = new Armory();
+  /** Particle dragons on procedural skeletons */
+  readonly dragons: DragonRig[] = [new DragonRig(), new DragonRig(), new DragonRig()];
+  /** What the big powers do to the arena (light, cracks, warp, storm) */
+  readonly arena = new ArenaState();
   readonly events: CombatEvent[] = [];
+  /**
+   * Speedster movement: 'velocity' crosses the space at extreme speed (a streak with
+   * afterimages), 'teleport' vanishes and reappears. (?speed=teleport)
+   */
+  speedMode: 'velocity' | 'teleport' = 'velocity';
+  /** Ultramove budget: they are events, not attacks */
+  ultraMax = 2;
+  ultrasFired = 0;
+  lastUltraBeat = -1e9;
+  /** Beats between two ultramoves, at least */
+  readonly ultraGap = 40;
+  /** Dev aid: ?weapon=halberd,flail */
+  forceWeapon: [string | null, string | null] = [null, null];
 
   beat = 0;
   time = 0;
@@ -349,6 +459,9 @@ export class CombatEngine {
   readonly stage: Stage = { cx: 0, cz: 0, ang: 0, sep: 5, tcx: 0, tcz: 0, tang: 0, tsep: 5, rate: 2, angVel: 0, crate: 0.8, lin: 0 };
   private timeline: { at: number; fn: () => void }[] = [];
   private recent: PhraseKind[] = [];
+  /** What kind of fight this show is (rolled per seed; ?flavor=id to force) */
+  flavor: FightFlavor = FLAVORS[0]!;
+  forceFlavor: string | null = null;
   private plan: SongPlan = { totalBeats: 1e9, introEnd: 16, outroStart: 1e9, drops: [], intensity: () => 0.3 };
   private dropsHandled = new Set<number>();
   private pending: { kind: PhraseKind; at: number; fighter: number; tech?: TechId } | null = null;
@@ -374,14 +487,22 @@ export class CombatEngine {
     this.outroDone = false;
     this.beat = 0;
     this.phraseEnd = 0;
+    this.ultrasFired = 0;
+    this.lastUltraBeat = -1e9;
+    this.flavor = FLAVORS.find((f) => f.id === this.forceFlavor) ?? this.rng.choice(FLAVORS);
     // Two different archetypes
     const a0 = this.forceArch[0] ?? this.rng.choice(ARCHETYPE_IDS);
     const a1 = this.forceArch[1] ?? this.rng.choice(ARCHETYPE_IDS.filter((a) => a !== a0));
-    const bare: WeaponType[] = ['blade', 'staff', 'scythe', 'claws'];
     [a0, a1].forEach((id, i) => {
       const f = this.fighters[i]!;
       f.arch = ARCHETYPES[id];
-      f.weapon = f.arch.weapon ?? this.rng.choice(bare);
+      f.weaponSet = this.pickWeaponSet(f.arch, this.forceWeapon[i]);
+      const sig = f.arch.weapon ? setOfForm(f.arch.weapon) : undefined;
+      f.signature = !!sig && sig === f.weaponSet;
+      f.weapon = f.weaponSet.form;
+      const lo = buildLoadout(this.rng, f.arch, f.weaponSet);
+      f.supers = lo.supers;
+      f.ultras = lo.ultras;
       f.motion.setProfile(PROFILES[id] ?? DEFAULT_PROFILE);
       f.setProportions(BUILDS[id] ?? DEFAULT_PROPORTIONS);
     });
@@ -399,6 +520,23 @@ export class CombatEngine {
 
   setPlan(plan: SongPlan): void {
     this.plan = plan;
+    // A cinematic budget: one ultramove per ~3 minutes of a typical song, two to four in all
+    // (the finale's ultra is extra — it ends the show)
+    const beats = Math.min(plan.totalBeats, 2000);
+    this.ultraMax = clamp(1 + Math.floor(beats / 190), 1, 4);
+  }
+
+  /**
+   * The show's weapon for a style: armed styles usually keep their signature weapon but
+   * sometimes pick up another from their affinity list; bare-handed styles get the one they
+   * manifest when a fight turns armed.
+   */
+  private pickWeaponSet(arch: Archetype, forced: string | null): WeaponSet {
+    if (forced) return weaponSet(forced);
+    const sig = arch.weapon ? setOfForm(arch.weapon) : undefined;
+    const pool = WEAPON_SETS.filter((s) => s.affinity.includes(arch.id) && s !== sig);
+    if (sig && (this.rng.boolean(0.55) || !pool.length)) return sig;
+    return pool.length ? this.rng.choice(pool) : WEAPON_SETS[0]!;
   }
 
   private resetActors(): void {
@@ -409,7 +547,12 @@ export class CombatEngine {
       f.dead = false;
       f.present = false;
       f.weaponOn = false;
-      f.weapon = f.arch.weapon ?? f.weapon;
+      f.weapon = f.weaponSet.form;
+      f.motion.setLoad(0);
+      f.loose = null;
+      f.hidden = false;
+      f.path = null;
+      f.floatFire.fill(-99);
       f.meter = 0;
       f.form = null;
       f.bladeElement = null;
@@ -428,6 +571,8 @@ export class CombatEngine {
     }
     for (const p of this.pets) p.active = false;
     this.clearSpecials();
+    this.arena.reset();
+    for (const d of this.dragons) d.active = false;
     const ang = this.rng.range(0, Math.PI);
     Object.assign(this.stage, { cx: 0, cz: 0, ang, sep: 22, tcx: 0, tcz: 0, tang: ang, tsep: 22, rate: 2, angVel: 0, crate: 0.8, lin: 0 });
     this.placeStage();
@@ -546,6 +691,9 @@ export class CombatEngine {
       if (this.beat > f.end) f.active = false;
       else if (this.beat >= f.born) f.update(this.beat);
     }
+    this.armory.update(this.beat, simDt, this.fighters);
+    for (const d of this.dragons) d.update(simDt);
+    this.arena.update(simDt);
     if (this.lock.active) {
       const pa = this.fighters[0].joint(J.rHand);
       const pb = this.fighters[1].joint(J.rHand);
@@ -567,7 +715,15 @@ export class CombatEngine {
     const ramp = clamp((beat - p.introEnd) / rampLen);
     const cap = 0.14 + 0.86 * Math.pow(ramp, 1.3);
     const onDrop = p.drops.some((d) => beat >= d && beat < d + 16) ? 0.15 : 0;
-    return clamp(Math.min(I * 1.05 + onDrop, cap + onDrop), 0.06, 1);
+    // Once the fight is on it never idles: a high floor, and the flavour's own edge
+    const on = beat > p.introEnd;
+    const floor = on ? 0.48 : 0.06;
+    return clamp(Math.min(I * 1.05 + onDrop, cap + onDrop) + 0.16 + (on ? this.flavor.heat : 0), floor, 1);
+  }
+
+  /** Creative parameters of the current frame (0 … 1) */
+  get params(): Readonly<NormalizedParams> {
+    return this.prm;
   }
 
   /** Seconds per beat */
@@ -577,7 +733,8 @@ export class CombatEngine {
 
   /** Smallest subdivision (½, 1 or 2 beats) lasting at least `sec` seconds — keeps moves readable at any tempo */
   grid(sec: number): number {
-    for (const g of [0.5, 1, 2]) if (g * this.spb >= sec) return g;
+    const s = sec / this.flavor.tempo;
+    for (const g of [0.5, 1, 2]) if (g * this.spb >= s) return g;
     return 2;
   }
 
@@ -624,7 +781,30 @@ export class CombatEngine {
     const px = a.x;
     const pz = a.z;
     const look = a.faceTarget ?? foe;
-    const teleported = a.integrateBody(dt, a.tx + a.ox, a.tz + a.oz, Math.atan2(look.z - a.z, look.x - a.x));
+    // What the hands carry weighs on the arms
+    if (a instanceof Fighter) a.motion.setLoad(a.weaponOn ? (a.weapon === a.weaponSet.form ? a.weaponSet.mass : 1.2) : 0);
+    // Extreme speed: the body is exactly where the path says (accelerates out, brakes in)
+    let onPath = false;
+    const sp = a.path;
+    if (sp && this.beat >= sp.t0) {
+      const u = clamp((this.beat - sp.t0) / Math.max(1e-3, sp.t1 - sp.t0));
+      const e = u * u * (3 - 2 * u);
+      if (sp.arc === 0) a.drive(sp.x0 + (sp.x1 - sp.x0) * e, sp.z0 + (sp.z1 - sp.z0) * e, dt);
+      else {
+        const ang = sp.a0 + sp.arc * e;
+        const r = sp.r0 + (sp.r1 - sp.r0) * e;
+        a.drive(sp.cx + Math.cos(ang) * r, sp.cz + Math.sin(ang) * r, dt);
+      }
+      onPath = true;
+      if (u >= 1) {
+        a.path = null;
+        this.settleAfterPath(a, foe);
+      }
+    }
+    // Bodies overlapping (a dash through, a clinch): the bearing is noise, hold the facing
+    const lx = look.z - a.z, lz = look.x - a.x;
+    const want = lx * lx + lz * lz < 0.12 ? a.facing : Math.atan2(lx, lz);
+    const teleported = a.integrateBody(dt, a.tx + a.ox, a.tz + a.oz, want, onPath);
     const vx = teleported ? 0 : (a.x - px) / dt;
     const vz = teleported ? 0 : (a.z - pz) / dt;
     a.speed = Math.hypot(vx, vz);
@@ -819,8 +999,16 @@ export class CombatEngine {
     }
   }
 
-  /** Vanish and reappear around the target (flash step, instant transmission) */
+  /**
+   * Flash step round the target: in 'velocity' mode an arc at extreme speed (the body is a
+   * streak of afterimages for a fraction of a beat), in 'teleport' mode a vanish and a
+   * reappearance. Every technique that used to teleport goes through here.
+   */
   teleport(A: Fighter, D: Fighter, angle: number, dist: number, t: number): void {
+    if (this.speedMode === 'velocity') {
+      this.speedArc(A, D, angle, dist, t, 0.22);
+      return;
+    }
     this.at(t, () => {
       if (A.dead || D.dead) return;
       this.emit('teleport', A.joint(J.chest), this.dirBetween(A, D), 0.7, A.team, D.team);
@@ -828,6 +1016,45 @@ export class CombatEngine {
       A.dashing = 0.25;
       this.emit('teleport', [A.x, 1.1, A.z], this.dirBetween(A, D), 1, A.team, D.team, { critical: true });
     });
+  }
+
+  /** Circle round a pivot at extreme speed, ending `dist` from it, `angle` radians round */
+  speedArc(A: Actor, P: Actor, angle: number, dist: number, t: number, dur: number): void {
+    this.at(t, () => {
+      if (A instanceof Fighter && A.dead) return;
+      const a0 = Math.atan2(A.z - P.z, A.x - P.x);
+      const r0 = Math.max(0.5, Math.hypot(A.x - P.x, A.z - P.z));
+      A.path = { t0: t, t1: t + dur, x0: A.x, z0: A.z, x1: A.x, z1: A.z, cx: P.x, cz: P.z, a0, arc: angle, r0, r1: dist };
+      A.dashing = Math.max(A.dashing, dur * this.spb + 0.25);
+      const a1 = a0 + angle;
+      this.emit('speed_dash', A.joint(J.pelvis), [-Math.sin(a1), 0, Math.cos(a1)], 1, A.team, P.team, { beats: dur, radius: Math.abs(angle) * dist });
+    });
+  }
+
+  /** Cross the space in a straight line at extreme speed (speed dash) */
+  speedLine(A: Actor, to: () => readonly [number, number], t: number, dur: number, target = 1 - A.team): void {
+    this.at(t, () => {
+      if (A instanceof Fighter && A.dead) return;
+      const [x1, z1] = to();
+      A.path = { t0: t, t1: t + dur, x0: A.x, z0: A.z, x1, z1, cx: 0, cz: 0, a0: 0, arc: 0, r0: 0, r1: 0 };
+      A.dashing = Math.max(A.dashing, dur * this.spb + 0.25);
+      const d = this.dirBetween(A, { x: x1, z: z1 });
+      this.emit('speed_dash', A.joint(J.pelvis), d, 1, A.team, target, { beats: dur, radius: Math.hypot(x1 - A.x, z1 - A.z) });
+    });
+  }
+
+  /** After a speed path the stage takes over again from wherever the actor stopped */
+  private settleAfterPath(a: Actor, foe: Actor): void {
+    a.vx *= 0.25;
+    a.vz *= 0.25;
+    if (a instanceof Fighter && foe instanceof Fighter) {
+      const d = Math.max(0.6, Math.hypot(a.x - foe.x, a.z - foe.z));
+      this.placeAround(a, foe, 0, d, false);
+    } else {
+      a.tx = a.x;
+      a.tz = a.z;
+      a.ox = a.oz = 0;
+    }
   }
 
   // ------------------------------------------------------------------ strikes
@@ -838,6 +1065,20 @@ export class CombatEngine {
    */
   strike(att: Actor, def: Fighter, name: MoveName, t: number, unit: number, outcome: Outcome, opts: StrikeOpts = {}): void {
     const move: MoveDef = MOVES[name];
+    // Bows, thrown blades, floating weapons: the missile delivers the hit
+    if (RANGED_MOVES.has(name) && att instanceof Fighter) {
+      this.rangedAttack(att, def, name, t, unit, outcome, opts);
+      return;
+    }
+    // A feint sells the opening and never lands
+    if (NO_CONTACT.has(name)) {
+      this.at(t - unit, () => {
+        if (!att.active || (att instanceof Fighter && (att.dead || !att.present))) return;
+        att.play(move, t - unit, unit);
+      });
+      if (this.rng.boolean(0.5)) this.play(def, this.rng.choice(['block', 'sway', 'shoulderRoll'] as MoveName[]), t - unit * 0.7, unit);
+      return;
+    }
     this.at(t - unit, () => {
       if (!att.active || (att instanceof Fighter && (att.dead || !att.present))) return;
       const wl = att instanceof Fighter && att.weaponOn && move.weapon ? WEAPON_LENGTH[att.weapon] : 0;
@@ -862,14 +1103,17 @@ export class CombatEngine {
       }
     });
     if (outcome === 'block' || outcome === 'parry') {
-      const dm = outcome === 'parry' ? def.arch.parry : def.weaponOn ? def.arch.block : 'block';
-      this.play(def, dm, t - unit * 0.6, unit);
+      this.play(def, this.defenseMove(def, outcome, move.zone), t - unit * 0.6, unit);
     } else if (outcome === 'dodge') {
-      const dm = this.rng.choice(def.arch.dodges);
-      this.at(t - unit * 0.55, () => {
+      // Now and then a razor-thin, last-moment evasion (the director gives it bullet time)
+      const perfect = unit <= 1.2 && this.rng.boolean(0.06 + 0.12 * this.heat);
+      const dm = perfect ? 'perfectDodge' : this.dodgeMove(def);
+      const at = t - unit * (perfect ? 0.3 : 0.55);
+      this.at(at, () => {
         if (def.dead) return;
-        def.play(MOVES[dm], t - unit * 0.55, unit);
+        def.play(MOVES[dm], at, perfect ? unit * 0.7 : unit);
         def.dashing = 0.35;
+        if (perfect) this.emit('perfect_dodge', def.joint(J.chest), this.dirBetween(att, def), 1, def.team, att.team);
       });
     }
     for (const h of move.hits ?? []) {
@@ -905,6 +1149,11 @@ export class CombatEngine {
     const el = opts.element ?? (att instanceof Fighter ? att.element(move) : undefined);
     const A = att instanceof Fighter ? att : this.fighters[1 - def.team]!;
     const zone: Zone = reachOf(move, att.base, armedHit && att instanceof Fighter ? WEAPON_LENGTH[att.weapon] : 0, att.dims).zone;
+    // Energy weapons: a committed cut leaves a crescent that keeps flying past the target
+    if (!light && armedHit && att instanceof Fighter && att.weapon === att.weaponSet.form && att.weaponSet.archetypes.includes('ENERGY') && (move.power ?? 1) >= 1.15) {
+      const w = this.fx('wave', att, def, t, t + 0.9, { element: att.weaponSet.element ?? att.element(), attach: att, joint: J.rHand, ofF: 0.5, size: 0.95, size0: 0.55, growBeats: 0.3, tilt: this.rng.range(-0.7, 0.7) });
+      this.launchFx(w, t, t + 0.8, [def.x + dir[0] * 5, 1.1, def.z + dir[2] * 5]);
+    }
     if (outcome === 'hit') {
       if (light) {
         def.play(MOVES[zone === 'high' ? 'hitHead' : zone === 'low' ? 'hitLow' : 'hitBody'], t, 0.5);
@@ -936,6 +1185,82 @@ export class CombatEngine {
     } else if (!light) {
       att.motion.recoil(move.power ?? 1, 'miss');
       this.emit('dodge', def.joint(J.chest), dir, 0.5, def.team, att.team);
+    }
+  }
+
+  /** How this fighter stops a blow: their weapon's habit when armed, their style's otherwise */
+  private defenseMove(def: Fighter, outcome: 'block' | 'parry', zone?: Zone): MoveName {
+    if (def.weaponOn && !def.signature) {
+      const d = def.vocab.defense;
+      return outcome === 'parry' ? d.parry : d.block;
+    }
+    if (outcome === 'parry') return this.rng.boolean(0.25) ? 'deflect' : def.arch.parry;
+    if (def.weaponOn) return def.arch.block;
+    if (zone === 'low') return 'blockLow';
+    return this.rng.boolean(0.2) ? 'shoulderRoll' : 'block';
+  }
+
+  /** How this fighter gets out of the way: their own evasions, mixed with the shared ones */
+  private dodgeMove(def: Fighter): MoveName {
+    const own = def.weaponOn && !def.signature ? def.vocab.defense.dodges : def.arch.dodges;
+    return this.rng.boolean(0.35) ? this.rng.choice(GENERIC_DODGES) : this.rng.choice(own);
+  }
+
+  /**
+   * A bow, a thrown knife, a floating blade: the body plays the move (draw → loose, flick,
+   * command) so the release lands a flight time before the beat; the missile is an
+   * individual weapon object that arrives exactly on it.
+   */
+  private rangedAttack(A: Fighter, D: Fighter, name: MoveName, t: number, unit: number, outcome: Outcome, opts: StrikeOpts): void {
+    const set = A.weaponSet;
+    const floating = set.archetypes[0] === 'FLOATING_WEAPON';
+    const flight = floating ? 0.45 : name === 'w_flickThrow' ? 0.3 : 0.25;
+    const rel = t - flight;
+    const u = Math.max(0.5, Math.min(unit, 1));
+    this.at(rel - u, () => {
+      if (A.dead || !A.present || D.dead) return;
+      // Floating weapons keep their distance; archers step back into range
+      if (Math.abs(this.stage.sep - 5) > 1.5 && this.rng.boolean(0.6)) this.stageTo(clamp(this.stage.sep, 4, 6.5), 2.5);
+      A.play(MOVES[name], rel - u, u);
+      this.emit('windup', A.joint(J.chest), this.dirBetween(A, D), 0.4, A.team, D.team, { beats: u + flight, label: name });
+    });
+    const volley = name === 'w_commandSweep' ? 3 : name === 'w_flickThrow' && set.missile === 'knife' ? 3 : 1;
+    for (let k = 0; k < volley; k++) {
+      const tk = t + k * 0.12;
+      const relk = rel + k * 0.12;
+      this.at(relk - 0.35, () => {
+        if (A.dead || D.dead) return;
+        const kind = this.missileKind(set, k);
+        const slot = (this.rng.rangeInt(0, 7) + k * 3) % 8;
+        const it = this.armory.spawn({
+          kind, owner: A.team, target: D.team, element: set.element ?? A.element(), scale: kind === 'orb' ? 0.8 : 1,
+          layout: floating ? 'halo' : 'hand', anchor: A.team, a0: (slot / 8) * Math.PI * 2, r: 0.95, h: 0,
+          formAt: relk - 0.35, formDur: 0.3, stay: 0.3, seed: this.rng.next() * 100,
+        });
+        if (floating) A.floatFire[slot] = relk;
+        if (outcome === 'dodge') {
+          const d = this.dirBetween(A, D);
+          this.armory.launch(it, relk, tk, [D.x + d[0] * 2.5, 0.05, D.z + d[2] * 2.5], { lift: 0.3, embed: true });
+        } else {
+          this.armory.launch(it, relk, tk, null, { homing: D.team, joint: J.chest, lift: floating ? 0.8 : 0.15, side: floating ? (k - 1) * 0.8 : 0 });
+        }
+      });
+    }
+    if (outcome === 'hit') this.impact(A, D, t, { damage: opts.damage ?? 3, knock: (opts.knock ?? 1) * 2.5, element: set.element ?? A.element(), react: opts.react ?? 'hitBody' });
+    else this.impact(A, D, t, { outcome, damage: 1, knock: 1.5, element: set.element ?? A.element(), dodge: this.dodgeMove(D) });
+  }
+
+  private missileKind(set: WeaponSet, k: number): import('./powers/Armory').ArmKind {
+    switch (set.missile) {
+      case 'arrow':
+      case 'bolt': return 'arrow';
+      case 'knife': return 'knife';
+      case 'shuriken': return 'shuriken';
+      case 'chakram': return 'chakram';
+      case 'orb': return 'orb';
+      case 'blade': return k % 2 ? 'blade' : 'sword';
+      case 'mixed': return (['sword', 'spear', 'axe', 'lance', 'greatsword'] as const)[this.rng.rangeInt(0, 4)]!;
+      default: return 'knife';
     }
   }
 
@@ -1022,13 +1347,15 @@ export class CombatEngine {
   }
 
   damage(def: Fighter, amount: number, from: number, t: number): void {
-    def.health -= amount;
+    // The blows come fast: each one takes a little, so a knockout is a climax and not a
+    // routine interruption of the fight
+    def.health -= amount * 0.45;
     if (def.health <= 0) this.beginDeath(from, def, t);
   }
 
   private outcome(): Outcome {
     const h = this.heat;
-    const hit = 0.14 + 0.3 * h + this.prm.fight * 0.08;
+    const hit = 0.24 + 0.3 * h + this.prm.fight * 0.1;
     const r = this.rng.next();
     if (r < hit) return 'hit';
     if (r < hit + 0.3) return 'block';
@@ -1128,6 +1455,8 @@ export class CombatEngine {
         const ang = base + ((i + 0.5) / n) * Math.PI * 2;
         c.team = A.team;
         c.owner = A.team;
+        c.phantom = false;
+        c.path = null;
         c.active = true;
         c.spawnBeat = this.beat;
         c.x = A.x;
@@ -1329,14 +1658,20 @@ export class CombatEngine {
     for (const f of this.fighters) {
       f.faceTarget = null;
       f.posRate = 5;
+      // A weapon left planted or thrown comes home before anything else happens
+      if (f.loose) {
+        f.loose = null;
+        if (f.arch.weapon) this.drawWeapon(f);
+      }
       // Weapons: armed styles keep theirs (and re-form a lost one); a borrowed blade is dismissed
-      if (f.weaponOn && (handsFree || (!f.arch.weapon && kind !== 'weapon_duel' && kind !== 'tension' && kind !== 'blade_lock'))) {
+      const keepsArmed = kind === 'weapon_duel' || kind === 'tension' || kind === 'blade_lock' || kind === 'hybrid';
+      if (f.weaponOn && (handsFree || (!f.arch.weapon && !keepsArmed))) {
         f.weaponOn = false;
       } else if (!f.weaponOn && f.arch.weapon && !handsFree && kind !== 'super' && kind !== 'ultra') {
-        f.weapon = f.arch.weapon;
+        f.weapon = f.weaponSet.form;
         this.drawWeapon(f);
       }
-      if (f.weaponOn && f.arch.weapon && f.weapon !== f.arch.weapon && kind !== 'super' && kind !== 'ultra') f.weapon = f.arch.weapon;
+      if (f.weaponOn && f.arch.weapon && f.weapon !== f.weaponSet.form && kind !== 'super' && kind !== 'ultra') f.weapon = f.weaponSet.form;
       if (kind !== 'standoff' && kind !== 'power_up') f.setStance('guard');
     }
     this.stage.angVel = 0;
@@ -1362,7 +1697,10 @@ export class CombatEngine {
       case 'blade_lock': len = this.phraseLock(start, A, D); break;
       case 'grapple': len = this.phraseGrapple(start, A, D); break;
       case 'super': len = this.phraseSuper(start, A, D, tech); break;
-      case 'ultra': len = this.phraseUltra(start, A, D); break;
+      case 'ultra': len = this.phraseUltra(start, A, D, tech); break;
+      case 'hybrid': len = this.phraseHybrid(start, A, D); break;
+      case 'speed_blitz': len = this.phraseSpeedBlitz(start, A, D); break;
+      case 'rush': len = this.phraseRush(start, A, D); break;
       default: break;
     }
     this.phrase = kind;
@@ -1383,10 +1721,12 @@ export class CombatEngine {
     this.dropsHandled.add(drop);
     const who = this.attacker;
     const A = this.fighters[who]!;
-    const late = drop > this.plan.totalBeats * 0.4 || this.plan.drops.indexOf(drop) >= 1;
+    const late = drop > this.plan.totalBeats * 0.3 || this.plan.drops.indexOf(drop) >= 1;
     const options: { kind: PhraseKind; lead: number; tech?: TechId }[] = [];
-    if (late && A.ultraUsed === 0 && drop < this.plan.outroStart - 4) {
-      options.push({ kind: 'ultra', lead: TECHNIQUES[A.arch.ultra].lead, tech: A.arch.ultra });
+    const ult = this.pickUltra(A);
+    if (late && this.ultraAvailable(A, drop - TECHNIQUES[ult].lead) && drop < this.plan.outroStart - 4) {
+      // The drop is where an ultramove's impact belongs: its build-up rides the music's
+      options.push({ kind: 'ultra', lead: TECHNIQUES[ult].lead, tech: ult });
     } else {
       const t = this.pickTech(A);
       options.push({ kind: 'super', lead: TECHNIQUES[t].lead, tech: t }, { kind: 'dash_clash', lead: 3 }, { kind: 'beam_clash', lead: 2 }, { kind: 'summon', lead: 6 });
@@ -1416,15 +1756,19 @@ export class CombatEngine {
     const song = this.beat / Math.max(1, this.plan.totalBeats);
     const dropsAhead = this.plan.drops.some((d) => d > this.beat && !this.dropsHandled.has(d) && d < this.plan.outroStart - 4);
     const w: [PhraseKind, number][] = [
-      ['tension', 1.6 * (1 - h) * (1 - h) + 0.1],
-      ['standoff', h < 0.3 ? 0.6 : 0.08],
-      ['exchange', 3 + f * 1.4],
+      // Non-stop: circling and posing are rare breaths, trading blows is the default
+      ['tension', 0.08 * (1 - h) + 0.02],
+      ['standoff', h < 0.3 ? 0.06 : 0],
+      ['exchange', 3.6 + f * 2],
       ['weapon_duel', h > 0.3 ? (A.arch.weapon ? 0.5 : 0.35) : 0],
       ['mirror_clash', h > 0.3 ? 0.7 : 0],
       ['blade_lock', h > 0.35 ? (A.weaponOn && D.weaponOn ? 0.8 : 0.35) : 0],
       ['grapple', h > 0.3 ? 0.6 : 0],
       ['super', h > 0.4 && A.meter >= 0.5 ? 1.8 + e : 0],
-      ['ultra', song > 0.5 && A.ultraUsed === 0 && h > 0.55 && !dropsAhead && this.beat < this.plan.outroStart - 16 ? 2.5 : 0],
+      ['ultra', song > 0.35 && h > 0.55 && A.meter >= 0.8 && !dropsAhead && this.ultraAvailable(A, this.beat) && this.beat < this.plan.outroStart - 16 ? 2.2 : 0],
+      ['hybrid', h > 0.3 ? (A.weaponOn || A.arch.weapon ? 0.75 : 0.45) : 0],
+      ['rush', h > 0.4 ? 0.8 + f * 0.6 : 0],
+      ['speed_blitz', h > 0.45 ? (A.motion.profile.movementStyle === 'agile' ? 0.9 : 0.3) + e * 0.2 : 0],
       ['ki_barrage', h > 0.35 ? 0.2 + h * 0.3 : 0],
       ['summon', h > 0.38 ? 0.2 + h * e * 0.5 : 0],
       ['pet_assault', hasPet && h > 0.35 ? 0.4 + h * 0.4 : 0],
@@ -1436,6 +1780,7 @@ export class CombatEngine {
     ];
     let total = 0;
     for (const item of w) {
+      item[1] *= this.flavor.weights[item[0]] ?? 1;
       if (item[0] === this.recent[0]) item[1] *= item[0] === 'exchange' ? 0.5 : 0.1;
       else if (this.recent.slice(1, 4).includes(item[0]) && item[0] !== 'exchange') item[1] *= 0.4;
       total += item[1];
@@ -1495,14 +1840,35 @@ export class CombatEngine {
     return len;
   }
 
-  /** A combo string: authored (60 %) or spliced from the archetype's basics */
+  /**
+   * A combo string. With the style's own weapon (or bare hands): its authored strings or
+   * splices of its basics, and the shared hand-to-hand grammar. With another weapon set:
+   * that weapon's vocabulary. Armed fighters also throw hybrid strings (weapon → kick,
+   * spear → elbow, shield → shoulder charge).
+   */
   private pickCombo(A: Fighter): MoveName[] {
     const a = A.arch;
-    if (this.rng.boolean(0.6)) return [...this.rng.choice(a.combos)];
+    const other = A.weaponOn && !A.signature;
+    const r = this.rng.next();
+    if (A.weaponOn && r < 0.2) return [...this.rng.choice(A.weaponSet.hybrid)];
+    if (!other && r < 0.52) return [...this.rng.choice(a.combos)];
+    if (!A.weaponOn && r < 0.8) return this.basicCombo();
+    const light = other ? A.vocab.light : a.light;
+    const heavy = other ? A.vocab.heavy : a.heavy;
+    const launchers = other ? A.vocab.launchers : a.launchers;
     const n = this.rng.rangeInt(2, 4);
     const out: MoveName[] = [];
-    for (let i = 0; i < n - 1; i++) out.push(this.rng.choice(this.rng.boolean(0.7) ? a.light : a.heavy));
-    out.push(this.rng.choice(this.rng.boolean(0.3) ? a.launchers : a.heavy));
+    for (let i = 0; i < n - 1; i++) out.push(this.rng.choice(this.rng.boolean(0.7) ? light : heavy));
+    out.push(this.rng.choice(this.rng.boolean(0.3) ? launchers : heavy));
+    return out;
+  }
+
+  /** The shared hand-to-hand grammar: open (a jab, a feint, a low kick) → build → finish, sometimes a grapple */
+  private basicCombo(): MoveName[] {
+    const out: MoveName[] = [this.rng.choice(OPENERS)];
+    const n = this.rng.rangeInt(1, 2);
+    for (let i = 0; i < n; i++) out.push(this.rng.choice(BUILDERS));
+    out.push(this.rng.boolean(0.18) ? this.rng.choice(GRAPPLES) : this.rng.choice(FINISHERS));
     return out;
   }
 
@@ -1517,13 +1883,14 @@ export class CombatEngine {
     const len = bars * 4;
     let A = A0;
     let D = D0;
-    this.stageTo(Math.min(this.stage.sep, 2.2), 2, this.rng.range(-0.4, 0.4));
-    let t = s + (h < 0.3 ? 2 : 1);
+    this.stageTo(Math.min(this.stage.sep, 2.2 * this.flavor.spacing), 2.4, this.rng.range(-0.4, 0.4));
+    let t = s + 0.5;
     let prevImpact = s;
     let combo = this.pickCombo(A);
     let ci = 0;
     while (t <= s + len - 0.5 + 1e-6) {
-      const secs = (h < 0.3 ? 0.62 : h < 0.6 ? 0.42 : 0.3) / A.arch.tempo;
+      // Blows on eighth notes as soon as the fight heats up (quarters only at low heat)
+      const secs = (h < 0.4 ? 0.36 : h < 0.65 ? 0.24 : 0.19) / (A.arch.tempo * (A.weaponOn && !A.signature ? A.weaponSet.speed : 1));
       const step = this.grid(secs);
       const name = combo[ci++]!;
       const move = MOVES[name];
@@ -1538,8 +1905,8 @@ export class CombatEngine {
       prevImpact = t;
       if (out === 'hit' && (move.launch || move.sweep)) {
         // Knocked off their feet: a juggle, or a moment to get back up
-        if (move.launch && this.rng.boolean(0.5)) t = this.juggle(A, D, t);
-        else t += 3;
+        if (move.launch && this.rng.boolean(0.6)) t = this.juggle(A, D, t);
+        else t += 2;
         prevImpact = t - step;
         combo = this.pickCombo(A);
         ci = 0;
@@ -1642,10 +2009,11 @@ export class CombatEngine {
     let att = A;
     let def = D;
     const per = this.grid(this.heat > 0.65 ? 0.3 : 0.5);
-    const swings = (f: Fighter): MoveName[] => (f.arch.weapon ? f.arch.light.concat(f.arch.heavy) : SLASHES);
+    // Each side fights with its own weapon's vocabulary (its style's authored swings if it is the signature weapon)
+    const swings = (f: Fighter): MoveName[] => (f.signature ? f.arch.light.concat(f.arch.heavy) : f.vocab.light.concat(f.vocab.heavy));
     for (let t = s + 2; t <= s + 7 + 1e-6; t += per) {
       const last = t > s + 7 - 1e-6;
-      const pool = swings(att).filter((m) => MOVES[m].weapon);
+      const pool = swings(att).filter((m) => MOVES[m].weapon || RANGED_MOVES.has(m));
       const name = this.rng.choice(pool.length ? pool : SLASHES);
       if (last) {
         const fa = att;
@@ -1718,25 +2086,33 @@ export class CombatEngine {
       this.lock.active = true;
       for (const f of this.fighters) f.play(MOVES[armed ? 'lockPush' : 'lockPushBare'], s + 1, 0.5);
     });
-    // Pushing back and forth with the music
-    for (let k = 2; k <= 4; k++) {
+    // Pushing back and forth with the music (short: a breath, not a rest)
+    for (let k = 2; k <= 3; k++) {
       this.at(s + k, () => {
         this.stage.tcx += Math.cos(this.stage.ang) * (k % 2 ? 0.25 : -0.25);
         this.stage.tcz += Math.sin(this.stage.ang) * (k % 2 ? 0.25 : -0.25);
         this.stage.crate = 3;
-        this.emit('lock', [this.lock.x, this.lock.y, this.lock.z], this.dirBetween(a, b), 0.5 + k * 0.1, A.team, D.team);
+        this.emit('lock', [this.lock.x, this.lock.y, this.lock.z], this.dirBetween(a, b), 0.5 + k * 0.15, A.team, D.team);
       });
     }
-    this.at(s + 5, () => {
+    const brk = s + 3.5;
+    this.at(brk, () => {
       this.lock.active = false;
       const dir = this.dirBetween(A, D);
       this.emit('clash', [this.lock.x, this.lock.y, this.lock.z], dir, 1, A.team, D.team, { critical: true });
-      this.react(D, 'stagger', s + 5);
-      this.knock(D, dir, 7);
-      this.knock(A, [-dir[0], 0, -dir[2]], 2);
+      this.react(D, 'stagger', brk);
+      this.knock(D, dir, 5);
+      this.knock(A, [-dir[0], 0, -dir[2]], 1.5);
     });
-    this.strike(A, D, this.rng.choice(A.arch.heavy), s + 7, 1, this.rng.boolean(0.65) ? 'hit' : 'block', { critical: true });
-    return 8;
+    // The winner of the lock punishes the stagger at once
+    const combo = this.pickCombo(A);
+    let t = brk + 1;
+    for (const m of combo.slice(0, 3)) {
+      this.strike(A, D, m, t, 0.5, this.rng.boolean(0.75) ? 'hit' : 'block', { damage: 3 });
+      t += 0.5;
+    }
+    this.strike(A, D, this.rng.choice(A.arch.heavy), t + 0.5, 0.75, this.rng.boolean(0.7) ? 'hit' : 'block', { critical: true });
+    return Math.ceil(t + 1.5 - s);
   }
 
   /** Rush into a clinch, knees to the body, then a hip throw over to the other side */
@@ -1779,28 +2155,285 @@ export class CombatEngine {
     return 8;
   }
 
-  private pickTech(A: Fighter): TechId {
-    if (this.forceTech) return this.forceTech;
-    const pool = A.arch.supers.filter((t) => !A.recentTech.includes(t));
-    return this.rng.choice(pool.length ? pool : A.arch.supers);
+  /** A supermove from the fighter's loadout: their style's five, their weapon's, the universal ones they have an affinity for */
+  // ------------------------------------------------------------------ hybrid: weapon ↔ hand-to-hand
+  /** Throw the weapon at `to` (it tumbles end over end and plants itself there) */
+  releaseWeapon(A: Fighter, t: number, flight: number, to: () => Vector3Tuple, lift = 0.6): void {
+    this.at(t, () => {
+      if (A.dead || !A.weaponOn) return;
+      const h = A.joint(J.rHand);
+      const p = to();
+      A.loose = { mode: 'flight', t0: t, t1: t + flight, x0: h[0], y0: h[1], z0: h[2], x1: p[0], y1: p[1], z1: p[2], lift };
+      A.weaponOn = false;
+      this.emit('weapon_release', h, this.dirBetween(A, { x: p[0], z: p[2] }), 0.8, A.team, 1 - A.team, { beats: flight });
+    });
+    this.at(t + flight, () => {
+      if (A.loose && A.loose.mode === 'flight') A.loose.mode = 'planted';
+    });
   }
 
-  /** One of the attacker's five super moves */
+  /** Call a loose weapon back: it flies home and lands in the hand on `t + dur` */
+  recallWeapon(A: Fighter, t: number, dur: number): void {
+    this.at(t, () => {
+      const L = A.loose;
+      if (!L || A.dead) return;
+      const [x, y, z] = this.loosePoint(A, t);
+      A.loose = { mode: 'recall', t0: t, t1: t + dur, x0: x, y0: y, z0: z, x1: x, y1: y, z1: z, lift: 0.9 };
+      this.emit('weapon_recall', [x, y, z], this.dirBetween({ x, z }, A), 0.6, A.team, 1 - A.team, { beats: dur });
+    });
+    this.at(t + dur, () => {
+      if (A.dead) return;
+      A.loose = null;
+      A.weaponOn = true;
+      this.emit('weapon_recall', A.joint(J.rHand), UP, 1, A.team, 1 - A.team, { critical: true });
+    });
+  }
+
+  /** Where a loose weapon is (its grip), at beat b */
+  loosePoint(A: Fighter, b: number): Vector3Tuple {
+    const L = A.loose;
+    if (!L) return A.joint(J.rHand);
+    const u = clamp((b - L.t0) / Math.max(1e-3, L.t1 - L.t0));
+    const [ex, ey, ez] = L.mode === 'recall' ? A.joint(J.rHand) : [L.x1, L.y1, L.z1];
+    const k = L.mode === 'planted' ? 1 : u;
+    return [L.x0 + (ex - L.x0) * k, L.y0 + (ey - L.y0) * k + Math.sin(Math.PI * k) * L.lift, L.z0 + (ez - L.z0) * k];
+  }
+
+  /** The weapon forms in an empty hand, mid-combo */
+  manifestWeapon(A: Fighter, t: number): void {
+    this.at(t, () => {
+      if (A.dead) return;
+      A.weapon = A.weaponSet.form;
+      A.weaponOn = true;
+      A.auraBoost = Math.max(A.auraBoost, 0.7);
+      this.emit('weapon_manifest', A.joint(J.rHand), UP, 1, A.team, 1 - A.team, { sub: A.weaponSet.element ?? A.element() });
+      this.emit('weapon_form', A.joint(J.rHand), UP, 1, A.team, 1 - A.team);
+    });
+  }
+
+  /**
+   * Weapons don't switch the fists off. Armed: a weapon attack, the weapon thrown at the
+   * target (or planted in the floor), hand-to-hand while it is out of the hand, then it is
+   * called back into the hand for the finisher. Bare-handed: fists first, then the weapon
+   * forms in the hand mid-combo for the last blow.
+   */
+  private phraseHybrid(s: number, A: Fighter, D: Fighter): number {
+    const armedStyle = !!A.arch.weapon || A.weaponOn;
+    const variant = !armedStyle ? 'manifest' : this.rng.boolean(0.55) ? 'throw' : 'plant';
+    this.stageTo(2.1, 2, this.rng.range(-0.4, 0.4));
+    const step = this.grid(0.42 / Math.max(0.6, A.weaponSet.speed));
+    const set = A.weaponSet;
+    const weaponMoves = (A.signature ? A.arch.light.concat(A.arch.heavy) : A.vocab.light.concat(A.vocab.heavy)).filter((m) => MOVES[m].weapon);
+    const heavyWeapon = (A.signature ? A.arch.heavy : A.vocab.heavy).filter((m) => MOVES[m].weapon);
+    let t = s + 1;
+    if (variant === 'manifest') {
+      const fists = this.basicCombo().slice(0, 3);
+      for (const m of fists) {
+        this.strike(A, D, m, t, Math.max(step, 0.5), this.outcome());
+        t += Math.max(step, 0.5) + (MOVES[m].air || MOVES[m].keys.some((k) => k.p.spin !== undefined) ? 0.5 : 0);
+      }
+      this.play(A, 'w_manifest', t, 0.8);
+      this.manifestWeapon(A, t + 0.6);
+      const fin: MoveName = MOVES[set.special].weapon || RANGED_MOVES.has(set.special) ? set.special : weaponMoves.length ? this.rng.choice(weaponMoves) : 'slashDown';
+      this.strike(A, D, fin, t + 2, 1, 'hit', { critical: true, damage: 12 });
+      return Math.ceil(t + 3.5 - s);
+    }
+    if (!A.weaponOn) {
+      this.play(A, 'w_manifest', s, 0.8);
+      this.manifestWeapon(A, s + 0.6);
+    }
+    // 1. Weapon attack
+    const open = weaponMoves.length ? this.rng.choice(weaponMoves) : 'slashAcross';
+    this.strike(A, D, open, t + 0.5, 1, this.outcome());
+    t += 1.5;
+    // 2. Release: thrown at the target, or driven into the floor
+    if (variant === 'throw') {
+      this.play(A, 'w_hurl', t, 0.6);
+      const out: Outcome = this.rng.boolean(0.5) ? 'dodge' : this.rng.boolean(0.5) ? 'block' : 'hit';
+      this.releaseWeapon(A, t + 0.6, 0.45, () => {
+        const d = this.dirBetween(A, D);
+        // Past the target (it lands behind it) unless it connects
+        return out === 'hit' ? [D.x + d[0] * 0.3, 0.9, D.z + d[2] * 0.3] : [D.x + d[0] * 2.2 + d[2] * 0.6, 0.05, D.z + d[2] * 2.2 - d[0] * 0.6];
+      }, 0.5);
+      this.impact(A, D, t + 1.05, { outcome: out, damage: 6, knock: 4, element: set.element ?? A.element(), react: 'hitBody' });
+      if (out === 'hit') this.at(t + 1.1, () => { if (A.loose) { A.loose.x1 = D.x; A.loose.y1 = 0.05; A.loose.z1 = D.z; A.loose.x0 = D.x; A.loose.y0 = 1; A.loose.z0 = D.z; A.loose.t0 = t + 1.1; A.loose.t1 = t + 1.4; A.loose.mode = 'flight'; A.loose.lift = 0.6; } });
+      // …and closes the distance bare-handed while it is out of the hand
+      this.at(t + 1.2, () => this.closeIn(A, D, 1.1, t + 1.8));
+      t += 2;
+    } else {
+      this.play(A, 'w_plant', t, 0.6);
+      this.releaseWeapon(A, t + 0.55, 0.12, () => [A.x + Math.cos(A.facing) * 0.55, 0.05, A.z + Math.sin(A.facing) * 0.55], 0);
+      t += 1.4;
+    }
+    // 3. Hand-to-hand while the weapon is loose
+    const fists = [this.rng.choice(BUILDERS), this.rng.choice(OPENERS), this.rng.choice(FINISHERS)];
+    for (const m of fists.slice(0, this.rng.rangeInt(2, 3))) {
+      const u = Math.max(step, 0.5);
+      this.strike(A, D, m, t, u, this.outcome());
+      t += u + (MOVES[m].air || MOVES[m].keys.some((k) => k.p.spin !== undefined) ? 0.5 : 0);
+    }
+    // 4. Recall: the weapon flies home and is caught on the beat
+    this.recallWeapon(A, t, 0.6);
+    this.play(A, 'w_catch', t, 0.75);
+    // 5. Weapon finisher
+    const fin = heavyWeapon.length ? this.rng.choice(heavyWeapon) : 'slashDown';
+    this.strike(A, D, fin, t + 1.6, 1, 'hit', { critical: true, damage: 10 });
+    return Math.ceil(t + 3 - s);
+  }
+
+  // ------------------------------------------------------------------ speedster
+  /**
+   * Speed vocabulary: flash steps round the target striking from every side, phantom
+   * afterimages attacking in sync, a dash straight through the target, and the velocity
+   * break — accelerating past the normal limit into a shockwave.
+   */
+  /**
+   * The rush: the attacker closes in and unloads a blur of blows on sixteenth notes. The
+   * defender's guard holds for a beat, cracks, and the last blow — a launcher — lands on
+   * the next downbeat and sends them flying.
+   */
+  private phraseRush(s: number, A: Fighter, D: Fighter): number {
+    const pool: MoveName[] = A.weaponOn
+      ? (A.signature ? A.arch.light : A.vocab.light.filter((m) => !RANGED_MOVES.has(m)))
+      : ['jab', 'cross', 'jabR', 'crossL', 'hook', 'hookR', ...A.arch.light];
+    const alt: MoveName[] = pool.length ? pool : ['jab', 'cross'];
+    this.stageTo(1.3 * this.flavor.spacing, 5);
+    this.at(s + 0.25, () => {
+      A.auraBoost = 1;
+      this.emit('dash', A.joint(J.pelvis), this.dirBetween(A, D), 0.9, A.team, D.team);
+    });
+    const beats = this.heat > 0.7 ? 3 : 2;
+    const t0 = s + 1;
+    const n = beats * 4;
+    const guard = this.rng.rangeInt(2, 4);
+    for (let k = 0; k < n; k++) {
+      const t = t0 + k * 0.25;
+      const out: Outcome = k < guard ? 'block' : 'hit';
+      this.strike(A, D, alt[k % alt.length]!, t, 0.3, out, { damage: 1.4, knock: 0.25 });
+      // The guard gives way
+      if (k === guard) this.at(t, () => this.emit('clash', D.joint(J.chest), this.dirBetween(A, D), 0.8, A.team, D.team));
+    }
+    const fin = t0 + beats + 1;
+    const launcher = A.arch.launchers.length ? this.rng.choice(A.arch.launchers) : 'uppercut';
+    this.strike(A, D, launcher, fin, 0.75, 'hit', { critical: true, damage: 9, knock: 1.6, react: 'launched' });
+    this.at(fin + 1.4, () => {
+      D.airTarget = 0;
+      D.airRate = 12;
+    });
+    return Math.ceil(fin + 2 - s);
+  }
+
+  private phraseSpeedBlitz(s: number, A: Fighter, D: Fighter): number {
+    const r = this.rng.next();
+    const moves = (): MoveName => this.rng.choice(A.weaponOn ? (A.signature ? A.arch.light : A.vocab.light.filter((m) => !RANGED_MOVES.has(m))).concat(['roundhouse']) : A.arch.light.concat(['jab', 'cross', 'roundhouse', 'backfistSnap']));
+    this.stageTo(2.2, 2);
+    if (r < 0.4) {
+      // Multi-strike: appears on a different side for every blow
+      const n = this.rng.rangeInt(3, 5);
+      let t = s + 1;
+      for (let k = 0; k < n; k++) {
+        const ang = (this.rng.boolean() ? 1 : -1) * this.rng.range(1.2, 2.4);
+        this.teleport(A, D, ang, 1.4, t);
+        this.strike(A, D, moves(), t + 0.75, 0.5, k === n - 1 ? 'hit' : this.rng.boolean(0.6) ? 'hit' : 'block', { damage: 3, knock: 0.6 });
+        t += 1;
+      }
+      this.velocityBreak(A, D, t);
+      this.strike(A, D, this.rng.choice(A.arch.heavy), t + 1, 1, 'hit', { critical: true, damage: 10 });
+      return Math.ceil(t + 2.5 - s);
+    }
+    if (r < 0.7) {
+      // Phantom assault: afterimages that fight, all striking on the same beat
+      this.play(A, 'charge', s, 0.6);
+      this.at(s, () => (A.charge = 0.5));
+      this.at(s + 0.9, () => (A.charge = 0));
+      const ph = this.spawnClones(A, D, 3, s + 1, 1.5);
+      this.at(s + 1, () => ph.forEach((c) => (c.phantom = true)));
+      const t = s + 3;
+      ph.forEach((c) => this.strike(c, D, moves(), t, 1, 'hit', { damage: 3, knock: 0.3 }));
+      this.teleport(A, D, Math.PI * 0.9, 1.3, s + 1.8);
+      this.strike(A, D, this.rng.choice(A.arch.heavy), t, 1, 'hit', { critical: true, damage: 10, react: 'launched' });
+      this.popClones(t + 0.5);
+      return 6;
+    }
+    // Speed dash: straight through the target and out the other side, then the break
+    this.play(A, 'dash', s + 0.6, 0.4);
+    const through = s + 1;
+    this.speedLine(A, () => {
+      const d = this.dirBetween(A, D);
+      return [D.x + d[0] * 3.2 + d[2] * 0.4, D.z + d[2] * 3.2 - d[0] * 0.4];
+    }, through, 0.25);
+    this.impact(A, D, through + 0.13, { damage: 6, knock: 5, element: A.element(), react: 'hitSpin' });
+    this.velocityBreak(A, D, through + 1.5);
+    this.teleport(A, D, 0, 1.2, through + 2.3);
+    this.strike(A, D, this.rng.choice(A.arch.heavy), through + 3.3, 1, 'hit', { critical: true, damage: 9 });
+    return 6;
+  }
+
+  /** Accelerating past the limit: the air breaks around the fighter in a shockwave */
+  velocityBreak(A: Fighter, D: Fighter, t: number): void {
+    this.at(t - 0.6, () => {
+      if (A.dead) return;
+      A.play(MOVES.charge, t - 0.6, 0.3);
+      A.auraBoost = 1;
+    });
+    this.at(t, () => {
+      if (A.dead) return;
+      A.dashing = Math.max(A.dashing, 0.5);
+      this.emit('velocity_break', A.joint(J.pelvis), this.dirBetween(A, D), 1, A.team, D.team, { radius: 6, critical: true });
+      this.knock(D, this.dirBetween(A, D), 3);
+    });
+  }
+
+  private pickTech(A: Fighter): TechId {
+    if (this.forceTech && !TECHNIQUES[this.forceTech].ultra) return this.forceTech;
+    const pool = A.supers.filter((t) => !A.recentTech.includes(t));
+    return this.rng.choice(pool.length ? pool : A.supers);
+  }
+
+  /** The ultramove this fighter would use next: one they have not used yet, their newest first */
+  pickUltra(A: Fighter): TechId {
+    if (this.forceTech && TECHNIQUES[this.forceTech].ultra) return this.forceTech;
+    const fresh = A.ultras.filter((u) => !A.recentTech.includes(u));
+    const pool = fresh.length ? fresh : A.ultras;
+    // Deterministic but varied: which one leads depends on how many the show has had
+    return pool[(this.ultrasFired + A.team) % pool.length]!;
+  }
+
+  /** Cinematic budget: ultramoves are rare events, never back to back */
+  ultraAvailable(A: Fighter, at: number): boolean {
+    if (this.forceTech && TECHNIQUES[this.forceTech].ultra) return true;
+    return this.ultrasFired < this.ultraMax && at - this.lastUltraBeat >= this.ultraGap && A.ultraUsed < 2;
+  }
+
+  /** One of the attacker's supermoves */
   private phraseSuper(s: number, A: Fighter, D: Fighter, tech?: TechId): number {
     const id = tech ?? this.pendingTech ?? this.pickTech(A);
     this.pendingTech = null;
     A.meter = Math.max(0, A.meter - 0.5);
     A.recentTech.unshift(id);
-    A.recentTech.length = Math.min(A.recentTech.length, 3);
+    A.recentTech.length = Math.min(A.recentTech.length, 4);
     this.techName = TECHNIQUES[id].name;
-    return TECHNIQUES[id].run(this, s, A, D);
+    const def = TECHNIQUES[id];
+    const len = def.run(this, s, A, D);
+    // Every power ends in an aftermath: embers settle, a dust ring spreads, the light returns
+    const after = s + def.lead + 0.4;
+    this.at(after, () => {
+      if (D.dead) return;
+      this.fx('quake', A, D, after, after + 3, { variant: 'aftermath', element: def.element, homing: D, homingJoint: J.pelvis, size: def.radius ?? 3, n: 1 });
+    });
+    return len;
   }
 
-  /** The attacker's ultra */
-  private phraseUltra(s: number, A: Fighter, D: Fighter): number {
-    const id = this.forceTech && TECHNIQUES[this.forceTech].ultra ? this.forceTech : A.arch.ultra;
+  /** An ultramove: an arena-scale event */
+  private phraseUltra(s: number, A: Fighter, D: Fighter, tech?: TechId): number {
+    const id = tech && TECHNIQUES[tech].ultra ? tech : this.pendingTech && TECHNIQUES[this.pendingTech].ultra ? this.pendingTech : this.pickUltra(A);
     this.pendingTech = null;
     A.ultraUsed++;
+    A.meter = 0;
+    this.ultrasFired++;
+    this.lastUltraBeat = s;
+    A.recentTech.unshift(id);
+    A.recentTech.length = Math.min(A.recentTech.length, 4);
     this.techName = TECHNIQUES[id].name;
     return TECHNIQUES[id].run(this, s, A, D);
   }
@@ -2344,11 +2977,13 @@ export class CombatEngine {
     const L = f0.health <= f1.health ? f0 : f1;
     const W = L === f0 ? f1 : f0;
     this.attacker = W.team;
-    const ult = TECHNIQUES[W.arch.ultra];
+    const ultId = this.pickUltra(W);
+    const ult = TECHNIQUES[ultId];
     let len: number;
     if (this.plan.totalBeats - s >= ult.lead + 2) {
       L.health = Math.min(L.health, 12);
       this.techName = ult.name;
+      W.recentTech.unshift(ultId);
       len = ult.run(this, s, W, L);
       this.phrase = 'ultra';
     } else {
@@ -2375,7 +3010,7 @@ export class CombatEngine {
     def.health = 0;
     def.deathBeat = t;
     const t0 = Math.ceil(t);
-    def.reformBeat = final ? -1 : t0 + 6;
+    def.reformBeat = final ? -1 : t0 + 4;
     def.weaponOn = false;
     def.charge = W.charge = 0;
     def.airTarget = 0;
@@ -2397,20 +3032,20 @@ export class CombatEngine {
       this.phraseEnd = t0 + 1e6;
       return;
     }
-    this.at(t0 + 5, () => {
+    this.at(t0 + 3, () => {
       def.health = 100;
       def.superMode = 0;
       def.hitFlash = 1;
       def.setStance('guard');
       this.emit('reform', def.joint(J.chest), UP, 1, def.team, W.team);
     });
-    this.play(def, 'getUp', t0 + 6, 1);
-    this.at(t0 + 7, () => {
+    this.play(def, 'getUp', t0 + 4, 1);
+    this.at(t0 + 4, () => {
       W.setStance('guard');
       W.superMode = 0;
-      W.play(MOVES.settle, t0 + 7, 1);
+      W.play(MOVES.settle, t0 + 4, 0.75);
     });
-    this.phraseEnd = t0 + 8;
+    this.phraseEnd = t0 + 5;
   }
 
   private clearSpecials(): void {
@@ -2427,9 +3062,16 @@ export class CombatEngine {
       f.posRate = 5;
       f.airTarget = 0;
       f.form = null;
-      if (f.arch.weapon && f.weapon !== f.arch.weapon) f.weapon = f.arch.weapon;
+      if (f.weapon !== f.weaponSet.form) f.weapon = f.weaponSet.form;
+      f.loose = null;
+      f.path = null;
+      f.hidden = false;
     }
+    for (const c of this.clones) c.path = null;
     for (const p of this.pets) if (p.mode !== 'follow') p.mode = 'follow';
+    this.armory.clear();
+    for (const d of this.dragons) d.dismiss();
+    this.arena.settle();
   }
 
   /** The biggest thing on screen right now (a sky orb, a sword rain, a colossus) — for the camera */
@@ -2451,6 +3093,23 @@ export class CombatEngine {
         best = { x: f.x, y, z: f.z, r };
       }
     }
+    // Dragons: frame the middle of the body, big enough to take in the wings
+    for (const d of this.dragons) {
+      if (!d.active || d.vis < 0.3) continue;
+      const m = 20 * 3;
+      const r = Math.max(4, d.length * 0.45);
+      if (r > br) {
+        br = r;
+        best = { x: d.spine[m]!, y: d.spine[m + 1]!, z: d.spine[m + 2]!, r };
+      }
+    }
+    // Weapons of an arsenal spread over the arena
+    let n = 0, ax = 0, ay = 0, az = 0;
+    for (const it of this.armory.items) {
+      if (!it.active || it.state === 'off') continue;
+      n++; ax += it.x; ay += it.y; az += it.z;
+    }
+    if (n > 12 && br < 5) best = { x: ax / n, y: Math.min(6, ay / n), z: az / n, r: 5 };
     const sm = this.summon;
     if (sm.active && sm.anchored && br < 4) best = { x: sm.x, y: sm.style === 'avatar' ? 4.6 : sm.y * 0.7, z: sm.z, r: sm.style === 'avatar' ? 5 : 4 };
     return best;

@@ -45,6 +45,11 @@ export class BeatTracker {
   private votes = 0;
   private analysis: SongAnalysis | null = null;
   private lastSongBeat = -1;
+  // Kick drum: flux of the lowest bins only, against its own adaptive threshold
+  private prevLow = 0;
+  private kickFlux = new Float32Array(FLUX_HISTORY);
+  private kickPos = 0;
+  private lastKick = -9;
 
   /** With an analysis the beat grid, tempo, intensity and sections come from the song itself */
   setAnalysis(a: SongAnalysis | null): void {
@@ -65,6 +70,8 @@ export class BeatTracker {
     s.downbeat = false;
     s.onset = false;
     s.onsetStrength = 0;
+    s.kick = false;
+    s.kickStrength = 0;
     s.live = playing;
 
     let bass = 0;
@@ -86,6 +93,25 @@ export class BeatTracker {
         this.prev[i] = v;
       }
       bass /= 7;
+      // Kick: rise of the sub / low bins (1 … 5)
+      let low = 0;
+      for (let i = 1; i < 6; i++) low += freq[i]! / 255;
+      low /= 5;
+      const kf = Math.max(0, low - this.prevLow);
+      this.prevLow = low;
+      let km = 0;
+      for (let i = 0; i < FLUX_HISTORY; i++) km += this.kickFlux[i]!;
+      km /= FLUX_HISTORY;
+      let kv = 0;
+      for (let i = 0; i < FLUX_HISTORY; i++) kv += (this.kickFlux[i]! - km) ** 2;
+      const ks = Math.sqrt(kv / FLUX_HISTORY);
+      this.kickFlux[this.kickPos] = kf;
+      this.kickPos = (this.kickPos + 1) % FLUX_HISTORY;
+      if (kf > km + ks * 1.8 + 0.012 && low > 0.35 && this.clock - this.lastKick > 0.14) {
+        this.lastKick = this.clock;
+        s.kick = true;
+        s.kickStrength = clamp((kf - km) / (ks * 4 + 1e-4)) * 0.6 + clamp(low) * 0.4;
+      }
       mids /= 56;
       treble /= top - 64;
       flux /= 40;
@@ -132,6 +158,8 @@ export class BeatTracker {
     s.mids = bands[1]!;
     s.treble = bands[2]!;
     s.energy = s.bass * 0.5 + s.mids * 0.3 + s.treble * 0.2;
+    s.pulse = s.kick ? Math.max(s.pulse * Math.exp(-dt * 9), s.kickStrength) : s.pulse * Math.exp(-dt * 9);
+    s.bassSmooth = damp(s.bassSmooth, s.bass, s.bass > s.bassSmooth ? 18 : 4, dt);
     this.bassPeak = Math.max(this.bassPeak, s.bass);
 
     const a = this.analysis;

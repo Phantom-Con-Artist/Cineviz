@@ -24,6 +24,12 @@ interface BodyStyle {
   erosion: number;
   alpha: number;
   colors: TeamColors;
+  /**
+   * How much of the face the lens sees (0 … 1). Points are drawn without depth, so the
+   * eyes — the brightest points on the body — would shine through the back of the head
+   * and make a fighter seen from behind look straight into the camera.
+   */
+  eyes?: number;
 }
 
 type Part = { seg: number; gen: Gen; shade: number; kind: number };
@@ -347,6 +353,7 @@ export class BodyCloud {
     const c = st.colors;
     const auraGain = 1 + st.aura * 0.3 + st.superMode * 0.35;
     const drag = Math.exp(-1.6 * dt);
+    const eyes = st.eyes ?? 1;
     for (let i = 0; i < this.n; i++) {
       const i3 = i * 3;
       this.target(i, frames, tg);
@@ -404,7 +411,7 @@ export class BodyCloud {
       let cr = (c.core[0] + (c.edge[0] - c.core[0]) * s) * b;
       let cg = (c.core[1] + (c.edge[1] - c.core[1]) * s) * b;
       let cb = (c.core[2] + (c.edge[2] - c.core[2]) * s) * b;
-      const hk = Math.min(1, hot + (kind === 3 ? 1 : kind === 2 ? 0.35 : 0));
+      const hk = Math.min(1, hot + (kind === 3 ? eyes : kind === 2 ? 0.35 : 0));
       if (hk > 0) {
         const hb = kind === 3 ? 3 : 1.6;
         cr += (c.hot[0] * hb - cr) * hk;
@@ -431,7 +438,7 @@ export class BodyCloud {
       o.col[k * 3 + 1] = cg;
       o.col[k * 3 + 2] = cb;
       o.size[k] = (kind === 3 ? 1.6 : kind === 2 ? 0.9 : kind === 1 ? 1.4 : 0.95) * (1 + hot * 0.9);
-      o.alpha[k] = this.vis * st.alpha * aMul * (kind === 1 ? 0.25 : 0.92) * (this.free[i] > 50 ? fadeAll : 1);
+      o.alpha[k] = this.vis * st.alpha * aMul * (kind === 1 ? 0.25 : kind === 3 ? 0.92 * eyes : 0.92) * (this.free[i] > 50 ? fadeAll : 1);
     }
   }
 

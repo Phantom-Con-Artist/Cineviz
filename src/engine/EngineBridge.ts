@@ -9,7 +9,7 @@ import { CreativeParameters, DEFAULT_CREATIVE_PARAMETERS } from '../types/creati
 import { MusicState } from '../types/music';
 import { CombatEvent } from '../types/cinematic';
 import { CameraMode, EngineTelemetrySnapshot } from '../types/engine';
-import { detectBudget, RenderBudget } from '../utils/quality';
+import { defaultFxLevel, detectBudget, FX_LEVELS, FxLevel, RenderBudget } from '../utils/quality';
 
 /** What the viewport shows around the fight */
 export type ShowState = 'empty' | 'analyzing' | 'ready' | 'playing' | 'paused' | 'ended';
@@ -46,6 +46,8 @@ export class EngineBridge {
   /** Cinematic moments of the current show, in song time */
   public readonly markers: TimelineMarker[] = [];
   private lastSerial = 0;
+  /** Effect quality (LOW … ULTRA): never changes the choreography, only how much is drawn */
+  public fxLevel: FxLevel = 'HIGH';
 
   private seed = 42819;
   /** Seed of the current show: fresh every time a song starts over, unless the choreography is locked */
@@ -74,6 +76,10 @@ export class EngineBridge {
     barBeat: 0,
     onset: false,
     onsetStrength: 0,
+    kick: false,
+    kickStrength: 0,
+    pulse: 0,
+    bassSmooth: 0,
     section: 'intro',
     analyzed: false,
     songBeat: 0,
@@ -98,6 +104,14 @@ export class EngineBridge {
     const arch = (q.get('arch') ?? '').split(',');
     this.combat.forceArch = [(arch[0] as never) || null, (arch[1] as never) || null];
     if (q.get('seed')) this.seed = Number(q.get('seed')) | 0;
+    // ?speed=teleport, ?weapon=halberd,flail, ?fx=ULTRA, ?flavor=blitz|brawl|duel|sky|arcana|rampage
+    if (q.get('speed') === 'teleport') this.combat.speedMode = 'teleport';
+    this.combat.forceFlavor = q.get('flavor');
+    const wq = (q.get('weapon') ?? '').split(',');
+    this.combat.forceWeapon = [wq[0] || null, wq[1] || null];
+    const fx = (q.get('fx') ?? '').toUpperCase() as FxLevel;
+    this.fxLevel = FX_LEVELS.includes(fx) ? fx : defaultFxLevel(this.budget.tier);
+    this.particles.setFxLevel(this.fxLevel);
     this.lockChoreography = q.has('lock');
     this.initSimulation();
   }
@@ -128,6 +142,11 @@ export class EngineBridge {
 
   public setCreativeParams(params: CreativeParameters): void {
     this.params = normalize(params);
+  }
+
+  public setFxLevel(level: FxLevel): void {
+    this.fxLevel = level;
+    this.particles.setFxLevel(level);
   }
 
   public setCameraMode(mode: CameraMode): void {
