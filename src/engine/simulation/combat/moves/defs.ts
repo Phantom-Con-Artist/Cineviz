@@ -98,7 +98,7 @@ const SWAP: [ParamName, ParamName][] = [
   ['lShP', 'rShP'], ['lShA', 'rShA'], ['lEl', 'rEl'],
   ['lHipP', 'rHipP'], ['lHipA', 'rHipA'], ['lKn', 'rKn'],
 ];
-const NEGATE: ParamName[] = ['twist', 'tilt', 'rootZ', 'spin'];
+const NEGATE: ParamName[] = ['twist', 'tilt', 'rootZ', 'spin', 'hipTwist'];
 const LIMB_SWAP: Record<number, number> = {
   [J.lHand]: J.rHand, [J.rHand]: J.lHand, [J.lFoot]: J.rFoot, [J.rFoot]: J.lFoot,
   [J.lKn]: J.rKn, [J.rKn]: J.lKn, [J.lEl]: J.rEl, [J.rEl]: J.lEl,

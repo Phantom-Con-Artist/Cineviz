@@ -116,6 +116,7 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({ bridge, settings, onSett
             </div>
           </Sec>
           <div className="text-slate-600">skeleton · hit volumes · velocity · camera target · framing points drawn in view</div>
+          <a href="?reference" target="_blank" rel="noreferrer" className="block text-amber-300/70 hover:text-amber-200">motion reference viewer ↗</a>
         </div>
       )}
     </div>

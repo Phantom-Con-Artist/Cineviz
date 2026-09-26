@@ -10,12 +10,14 @@
  *   ?El    + bends the elbow (forearm forward/up)
  *   ?HipP  + swings the leg forward          ?Kn    + bends the knee
  *   spin   whole body about the vertical     flip   + rotates the body backwards (backflip)
+ *   hipTwist  extra pelvis rotation on top of the 30 % of `twist` the hips always follow
+ *             (the motion layer drives it: in real strikes the pelvis turns ~60 % as far as the chest)
  */
 export const PARAMS = [
   'rootX', 'rootY', 'rootZ', 'lean', 'twist', 'tilt', 'head',
   'lShP', 'lShA', 'lEl', 'rShP', 'rShA', 'rEl',
   'lHipP', 'lHipA', 'lKn', 'rHipP', 'rHipA', 'rKn',
-  'spin', 'flip',
+  'spin', 'flip', 'hipTwist',
 ] as const;
 export type ParamName = (typeof PARAMS)[number];
 export const PARAM_COUNT = PARAMS.length;
@@ -161,7 +163,7 @@ const JOINT_CLEARANCE = [0.12, 0.12, 0.06, 0, 0.07, 0.05, 0.06, 0.07, 0.05, 0.06
 export function solvePose(p: Float32Array, out: Float32Array, wx: number, wz: number, facing: number, air: number, frames?: Float32Array, d: Readonly<Dims> = DEFAULT_DIMS): void {
   const body = mul(ry(p[P.spin]!), rz(p[P.flip]!));
   const torso = mul(body, mul(ry(p[P.twist]!), mul(rz(-p[P.lean]!), rx(p[P.tilt]!))));
-  const hips = mul(body, ry(p[P.twist]! * 0.3));
+  const hips = mul(body, ry(p[P.twist]! * 0.3 + p[P.hipTwist]!));
   const headM = mul(torso, rz(-p[P.head]!));
 
   put(J.pelvis, -1, torso, 0, 0, 0);

@@ -22,7 +22,7 @@ const SHOT_LABEL: Record<ShotKind, string> = {
 
 const SHOT_TYPE: Record<ShotKind, ShotType> = {
   establish: 'WIDE', walk: 'FOLLOW', wide: 'WIDE', medium: 'TWO_SHOT', ots: 'TWO_SHOT', close: 'CLOSE_UP', hero: 'LOW_ANGLE',
-  god: 'HIGH_ANGLE', orbit: 'ORBIT', tracking: 'FOLLOW', aerial: 'LOW_ANGLE', beam: 'WIDE', requiem: 'HIGH_ANGLE',
+  god: 'HIGH_ANGLE', orbit: 'ORBIT', tracking: 'FOLLOW', aerial: 'TWO_SHOT', beam: 'WIDE', requiem: 'HIGH_ANGLE',
   summon: 'WIDE', pet: 'WIDE', impact: 'IMPACT', follow: 'FOLLOW',
 };
 
@@ -35,7 +35,7 @@ const TRANSITION: Partial<Record<ShotKind, number>> = {
 /** Shots that frame the pair, so swapping the "subject" does not change the picture */
 const GROUP_SHOT = new Set<ShotKind>(['establish', 'walk', 'wide', 'medium', 'god', 'tracking', 'aerial', 'beam', 'summon']);
 /** Shots whose distance is solved from the bodies' bounding box (and may be pushed back to keep them in frame) */
-const FIT_SHOT = new Set<ShotKind>(['walk', 'wide', 'medium', 'tracking', 'aerial', 'follow', 'impact', 'close']);
+const FIT_SHOT = new Set<ShotKind>(['walk', 'wide', 'medium', 'tracking', 'aerial', 'follow', 'impact', 'close', 'orbit']);
 /** Set pieces big enough to change the shot as soon as they start */
 const BIG_PHRASE = new Set<PhraseKind>(['beam_clash', 'power_up', 'ultra', 'finisher', 'summon', 'clone_jutsu', 'super', 'intro']);
 
@@ -70,27 +70,38 @@ export interface DirectorState {
 }
 
 /** Shots that suit each set piece; the director cycles through them on the beat */
+/**
+ * Shots that suit each set piece. While they fight, the camera keeps both fighters in
+ * frame (two-shot, wide, tracking, high angle) so the action reads; close-ups and low hero
+ * angles belong to the moments in between — posing, stare-downs, powering up, charging a
+ * technique ("aura farming").
+ */
 const POOLS: Record<PhraseKind, ShotKind[]> = {
   intro: ['walk', 'hero', 'walk', 'close', 'wide'],
-  tension: ['medium', 'hero', 'close', 'wide', 'ots'],
-  standoff: ['hero', 'close', 'wide', 'hero', 'medium'],
-  exchange: ['medium', 'ots', 'follow', 'tracking', 'ots', 'close', 'medium'],
-  dash_clash: ['wide', 'follow', 'tracking', 'medium'],
-  weapon_duel: ['medium', 'close', 'ots', 'tracking'],
-  clone_jutsu: ['god', 'wide', 'ots'],
-  ki_barrage: ['ots', 'medium', 'tracking', 'wide'],
-  beam_clash: ['beam', 'ots', 'god', 'beam'],
-  air_combo: ['aerial', 'medium', 'aerial'],
+  tension: ['hero', 'close', 'medium', 'wide'],
+  standoff: ['hero', 'close', 'wide', 'hero'],
+  exchange: ['medium', 'tracking', 'wide', 'medium', 'god'],
+  dash_clash: ['wide', 'tracking', 'medium'],
+  weapon_duel: ['medium', 'tracking', 'wide'],
+  clone_jutsu: ['god', 'wide'],
+  ki_barrage: ['wide', 'medium', 'tracking'],
+  beam_clash: ['beam', 'god', 'beam'],
+  air_combo: ['aerial', 'wide'],
   power_up: ['hero', 'close', 'god', 'hero'],
-  summon: ['summon', 'wide', 'summon'],
-  pet_assault: ['pet', 'medium', 'wide', 'pet'],
-  finisher: ['requiem', 'hero', 'requiem'],
-  mirror_clash: ['medium', 'ots', 'close', 'medium'],
-  blade_lock: ['close', 'medium', 'hero', 'close'],
-  grapple: ['medium', 'tracking', 'close'],
-  super: ['hero', 'medium', 'wide', 'close', 'medium'],
-  ultra: ['wide', 'god', 'hero', 'summon', 'wide'],
+  summon: ['summon', 'wide'],
+  pet_assault: ['pet', 'wide', 'medium'],
+  finisher: ['requiem', 'wide', 'requiem'],
+  mirror_clash: ['medium', 'tracking', 'wide'],
+  blade_lock: ['medium', 'hero', 'medium'],
+  grapple: ['medium', 'tracking', 'wide'],
+  super: ['medium', 'wide'],
+  ultra: ['wide', 'god', 'summon', 'wide'],
 };
+
+/** Phrases where nobody is trading blows: the fighters pose, stare, power up */
+const AURA_PHRASE = new Set<PhraseKind>(['intro', 'tension', 'standoff', 'power_up']);
+/** Shots that crop the action: only for aura farming */
+const POSE_SHOT = new Set<ShotKind>(['close', 'hero', 'ots']);
 
 const LETTERBOX: Record<PhraseKind, number> = {
   intro: 0.8, tension: 0.35, standoff: 0.55, exchange: 0, dash_clash: 0.4, weapon_duel: 0.25, clone_jutsu: 0.4,
@@ -189,6 +200,12 @@ export class Director {
   private eventLabel = '';
   private eventAt = -99;
   private lastSection = '';
+  /** Aura-farming window opened by a charge / power-up / transformation (director clock) */
+  private auraUntil = -1;
+  /** 0 … 1 slow dolly push towards the pair when a heavy blow winds up (instead of a cut) */
+  private push = 0;
+  private lastImpact = -99;
+  private engRef: CombatEngine | null = null;
   private readonly box = new Float32Array(3 * 64);
   private boxN = 0;
   private side = 1;
@@ -243,14 +260,11 @@ export class Director {
     const epic = prm.epic;
     switch (e.type) {
       case 'windup': {
-        // A heavy blow is coming: get the camera onto the attacker so the impact can be caught
-        const heavy = e.critical || e.intensity >= 0.85;
-        if (!heavy || this.slow.length || this.queue.length || this.clock - this.lastOverride < 1.2 || this.shot.age < 1.5) break;
-        if (Math.random() > 0.3 + prm.drama * 0.5) break;
-        const lead = (e.beats ?? 1) * eng.spb;
-        this.lastOverride = this.clock;
-        this.setShot(Math.random() < 0.6 ? 'follow' : 'medium', e.fighter, false, eng, undefined, clamp(lead * 0.8, 0.25, 0.9));
-        this.mark('Heavy wind-up');
+        // A heavy blow is coming: lean in on the pair (a slow dolly), don't cut away from it
+        if (e.critical || e.intensity >= 0.85) {
+          this.push = Math.max(this.push, 0.6 + prm.drama * 0.4);
+          this.mark('Heavy wind-up');
+        }
         break;
       }
       case 'phrase': {
@@ -260,6 +274,8 @@ export class Director {
         // A new set piece changes the shot only once the current one has had its moment
         // (big set pieces always do); a cut only now and then
         if (this.queue.length || (!BIG_PHRASE.has(this.phrase) && this.shot.age < this.minHold())) break;
+        // Continuity: if what we are on already suits the new set piece, stay on it
+        if (this.shot.age < 1.2 || POOLS[this.phrase].includes(this.shot.kind)) break;
         const cut = this.phrase !== 'intro' && Math.random() < 0.25 + epic * 0.25;
         this.setShot(this.nextFromPool(), e.fighter, cut, eng);
         break;
@@ -273,7 +289,7 @@ export class Director {
           this.bloom = 1;
           this.fovKick = -7;
           if (epic > 0.35) this.impactFrame = 0.07;
-          if (Math.random() < 0.5 + prm.drama * 0.4) this.impactSequence(eng, e.target, e.pos);
+          if (this.impactReady() && Math.random() < 0.5 + prm.drama * 0.4) this.impactSequence(eng, e.target, e.pos);
           else this.override(eng, 'orbit', e.target, false, e.pos);
           this.mark('Heavy impact');
         } else {
@@ -368,6 +384,7 @@ export class Director {
         this.shake(0.8);
         this.flash = 1;
         this.bloom = 1.5;
+        this.auraUntil = this.clock + 3;
         this.override(eng, 'hero', e.fighter, true);
         this.letterboxTarget = 1;
         this.mark('Power-up');
@@ -386,6 +403,7 @@ export class Director {
         this.mark('Death');
         break;
       case 'reform':
+        this.auraUntil = this.clock + 2.5;
         this.override(eng, 'hero', e.fighter, false);
         this.bloom = 1;
         break;
@@ -418,6 +436,7 @@ export class Director {
         this.bloom = 0.8;
         break;
       case 'tech_charge':
+        this.auraUntil = this.clock + 2.8;
         this.mark(e.label ? `Technique: ${e.label}` : 'Technique');
         this.caption = e.label ?? '';
         this.captionAge = 0;
@@ -453,7 +472,7 @@ export class Director {
           this.impactFrame = epic > 0.3 ? 0.08 : 0;
           this.bloom = 1.4;
           this.chroma = 1;
-          if (Math.random() < 0.4 + prm.drama * 0.3) this.impactSequence(eng, e.target, e.pos);
+          if (this.impactReady() && Math.random() < 0.4 + prm.drama * 0.3) this.impactSequence(eng, e.target, e.pos);
           else this.override(eng, 'orbit', e.target, false, e.pos);
           this.mark('Technique impact');
         } else {
@@ -472,7 +491,10 @@ export class Director {
         this.shake(0.6 * e.intensity);
         this.flash = Math.max(this.flash, e.intensity);
         this.bloom = 1.4;
-        if (e.intensity > 0.7) this.override(eng, 'hero', e.fighter, true);
+        if (e.intensity > 0.7) {
+          this.auraUntil = this.clock + 2.5;
+          this.override(eng, 'hero', e.fighter, true);
+        }
         break;
       case 'lock':
         this.shake(0.18);
@@ -501,7 +523,7 @@ export class Director {
 
   /** Event-driven shot change, rate limited so big moments never stack cuts */
   private override(eng: CombatEngine, kind: ShotKind, subject: number, cut: boolean, focus?: readonly number[]): void {
-    if (this.clock - this.lastOverride < 2.2 || this.shot.age < 0.9) return;
+    if (this.clock - this.lastOverride < 4.5 || this.shot.age < 1.5) return;
     this.lastOverride = this.clock;
     this.queue.length = 0;
     this.setShot(kind, subject, cut, eng, focus);
@@ -517,14 +539,28 @@ export class Director {
    * The camera catches a big blow: a fast push onto the point of impact (in bullet time),
    * a close-up of the victim recoiling, then a pull back to let it breathe.
    */
+  /** Impact sequences are special: not more than one every several seconds (the rest get slow-mo and shake on the current shot) */
+  private impactReady(): boolean {
+    return this.clock - this.lastImpact > 7 - this.prm.drama * 2;
+  }
+
   private impactSequence(eng: CombatEngine, victim: number, pos: readonly number[]): void {
     if (this.clock - this.lastOverride < 0.5) return;
     this.lastOverride = this.clock;
+    this.lastImpact = this.clock;
     this.queue.length = 0;
-    this.setShot('impact', victim, false, eng, pos, 0.16);
-    const slowHold = 0.45 + this.prm.slowMotion * 0.35;
-    this.book('close', victim, slowHold, 0.4);
-    this.book(Math.random() < 0.3 + this.prm.epic * 0.3 ? 'wide' : 'medium', victim, 1.1 + this.prm.drama * 0.6, 1.1);
+    // Push in on the blow — both fighters stay in frame — hold through the slow motion,
+    // then open up to let the knockback play out
+    this.setShot('impact', victim, false, eng, pos, 0.2);
+    const slowHold = 0.9 + this.prm.slowMotion * 0.5 + this.prm.drama * 0.4;
+    this.book(Math.random() < 0.35 + this.prm.epic * 0.3 ? 'wide' : 'medium', victim, slowHold, 1.1);
+  }
+
+  /** Nobody is trading blows right now: close-ups and low hero angles are welcome */
+  private auraFarming(eng?: CombatEngine | null): boolean {
+    if (!eng || !eng.running) return true;
+    if (AURA_PHRASE.has(this.phrase) || this.clock < this.auraUntil) return true;
+    return eng.fighters.every((f) => f.stanceKey === 'relaxed');
   }
 
   private mark(label: string): void {
@@ -534,6 +570,8 @@ export class Director {
   }
 
   private setShot(kind: ShotKind, subject: number, cut: boolean, eng?: CombatEngine, focus?: readonly number[], transition?: number): void {
+    // Mid-fight the action must read: no close-ups / low angles / over-the-shoulder
+    if (POSE_SHOT.has(kind) && !this.auraFarming(eng ?? this.engRef)) kind = 'medium';
     const s = this.shot;
     const same = s.kind === kind && (s.subject === subject || GROUP_SHOT.has(kind));
     if (same && !focus) return;
@@ -557,7 +595,7 @@ export class Director {
     this.pendingCut = doCut;
     this.blendT = 0;
     this.shotBeats = 0;
-    this.shotLen = kind === 'orbit' ? 4 : kind === 'walk' ? 16 : 4 + Math.floor(Math.random() * 3) * 2;
+    this.shotLen = kind === 'orbit' ? 6 : kind === 'walk' ? 16 : 8 + Math.floor(Math.random() * 3) * 4;
     s.duration = this.shotLen * (eng?.spb ?? 0.5);
     if (!same) this.shotNumber++;
     this.shotLabel = SHOT_LABEL[kind];
@@ -612,6 +650,8 @@ export class Director {
   // ------------------------------------------------------------------ frame
   update(dt: number, eng: CombatEngine, music: MusicState, prm: NormalizedParams, playing: boolean): void {
     this.prm = prm;
+    this.engRef = eng;
+    this.push = Math.max(0, this.push - dt * 0.8);
     this.clock += dt;
     this.captionAge += dt;
     const epic = prm.epic;
@@ -635,7 +675,7 @@ export class Director {
       // The song opens up (drop / climax): reveal on it — a low hero angle or a wide
       const big = music.section === 'drop' || music.section === 'climax';
       if (this.lastSection && big && !this.queue.length && this.slow.length === 0 && this.shot.age > 1) {
-        this.setShot(Math.random() < 0.4 + epic * 0.3 ? 'wide' : 'hero', eng.attacker, true, eng);
+        this.setShot(this.auraFarming(eng) ? (Math.random() < 0.5 ? 'hero' : 'wide') : Math.random() < 0.7 ? 'wide' : 'god', eng.attacker, true, eng);
         this.mark(music.section === 'drop' ? 'Drop' : 'Climax');
       }
       this.lastSection = music.section;
@@ -657,6 +697,11 @@ export class Director {
     }
 
     this.computeShot(eng);
+    // Wind-up dolly: ease in on the pair (the composition guard still keeps them whole)
+    if (this.push > 0 && (this.shot.kind === 'medium' || this.shot.kind === 'wide' || this.shot.kind === 'tracking')) {
+      const k = this.push * this.push * (3 - 2 * this.push);
+      this.want.dist *= 1 - 0.14 * k;
+    }
     // Lead the focus by how far the springs will lag behind moving subjects
     {
       const k = this.shot.kind;
@@ -752,7 +797,7 @@ export class Director {
 
   /** Shortest time a shot is held before the rhythm of the edit may change it (more drama, longer takes) */
   private minHold(): number {
-    return 2.2 + this.prm.drama * 1.6;
+    return 3.6 + this.prm.drama * 2.4;
   }
 
   private rngPick<T>(a: T[]): T {
@@ -939,18 +984,15 @@ export class Director {
       }
       case 'impact': {
         // Pushed in on the point of contact, a touch low, both bodies partly in frame
-        // Pushed in on the victim, with the point of contact (a fist, a blade tip) kept in frame
+        // A tight two-shot pushed in on the blow: both fighters and the point of contact in
+        // frame, a touch low, weighted towards the one taking the hit
         const hx = s.focus.x, hy = Math.max(0.4, s.focus.y), hz = s.focus.z;
-        const k = 0.65 + 0.35 * smoothstep(0.2, 1.2, τ);
-        w.fx = lerp(hx, sx, k); w.fy = lerp(hy, sy, k); w.fz = lerp(hz, sz, k);
-        w.yaw = onSide(A + Math.PI / 2, 0.55) + side * τ * 0.06;
-        w.pitch = 0.02;
+        this.collect(eng, [0, 1], [hx, hy, hz]);
+        w.fx = lerp(mx, sx, 0.3); w.fy = this.boxMidY(my); w.fz = lerp(mz, sz, 0.3);
+        w.yaw = A + side * (Math.PI / 2 + 0.3) + side * τ * 0.05;
+        w.pitch = 0.03;
         w.fov = 30;
-        const hj = subj.joints;
-        const B = this.box;
-        B.set([hx, hy, hz, sx, sy, sz, hj[J.head * 3]!, hj[J.head * 3 + 1]! + subj.dims.headR, hj[J.head * 3 + 2]!]);
-        this.boxN = 3;
-        w.dist = Math.max(2.1 - Math.min(τ * 0.4, 0.3), this.fitDistance(w.fx, w.fy, w.fz, w.yaw, w.pitch, w.fov, 0.8));
+        w.dist = Math.max(2.4, this.fitDistance(w.fx, w.fy, w.fz, w.yaw, w.pitch, w.fov, 0.93 - Math.min(τ * 0.03, 0.05)));
         roll = -0.04 * side;
         break;
       }
@@ -985,13 +1027,14 @@ export class Director {
         break;
       }
       case 'orbit': {
-        // Circle the moment, then drift onto the subject as knockback carries them off the mark
+        // Circle the moment, then drift onto the pair as knockback carries them off the mark
         const k = smoothstep(0.4, 1.8, τ);
-        w.fx = lerp(s.focus.x, sx, k); w.fy = lerp(Math.max(0.6, s.focus.y), sy, k); w.fz = lerp(s.focus.z, sz, k);
+        w.fx = lerp(s.focus.x, mx, k); w.fy = lerp(Math.max(0.6, s.focus.y), my, k); w.fz = lerp(s.focus.z, mz, k);
         w.yaw = s.startYaw + side * 0.35 * τ;
         w.pitch = 0.12;
-        w.dist = 3.6;
         w.fov = 34;
+        this.collect(eng, [0, 1]);
+        w.dist = Math.max(3.6, this.fitDistance(w.fx, w.fy, w.fz, w.yaw, w.pitch, w.fov, 0.9));
         break;
       }
       case 'tracking': {

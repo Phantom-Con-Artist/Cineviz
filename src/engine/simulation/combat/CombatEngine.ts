@@ -633,7 +633,7 @@ export class CombatEngine {
     let aim = 0;
     const bpm = this.music?.bpm ?? 120;
     if (a.move) {
-      a.motion.sample(a.move, this.beat, bpm, a.pose);
+      a.motion.sample(a.move, this.beat, bpm, a.pose, a.base);
       const d = a.move.def;
       const u = a.move.progress(this.beat);
       // Line the striking tip up with the target around the impact
@@ -658,7 +658,7 @@ export class CombatEngine {
 
     const c = Math.cos(a.facing), sn = Math.sin(a.facing);
     a.motion.step({
-      dt, time: this.time, beat: this.beat, pose: a.pose, move: a.move,
+      dt, time: this.time, beat: this.beat, pose: a.pose, base: a.base, move: a.move,
       vlx: vx * c + vz * sn, vlz: -vx * sn + vz * c, speed: a.speed, facingVel: a.facingVel,
       legsFree: !legsBusy, relaxed: a.stanceKey === 'relaxed', landing: a.landing, heat: this.heat,
     });

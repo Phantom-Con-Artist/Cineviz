@@ -5,6 +5,8 @@ interface CinematicOverlayProps {
   bridge: EngineBridge | null;
   /** True while a video export is recording */
   recording?: boolean;
+  /** Monitor HUD (status, shot, camera, time, fps); the phone layout has its own */
+  hud?: boolean;
 }
 
 const STATE_TEXT: Record<string, [string, string]> = {
@@ -32,7 +34,7 @@ export function formatClock(t: number, ms = true): string {
  * lines, technique captions, and a quiet monitor HUD (status, shot, camera, time, fps).
  * Driven by its own rAF loop writing styles directly — no React re-renders.
  */
-export const CinematicOverlay: React.FC<CinematicOverlayProps> = ({ bridge, recording = false }) => {
+export const CinematicOverlay: React.FC<CinematicOverlayProps> = ({ bridge, recording = false, hud = true }) => {
   const top = useRef<HTMLDivElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
   const invert = useRef<HTMLDivElement>(null);
@@ -134,7 +136,7 @@ export const CinematicOverlay: React.FC<CinematicOverlayProps> = ({ bridge, reco
       </div>
 
       {/* Monitor HUD */}
-      <div className="absolute top-3 left-4 flex items-center gap-4 font-mono text-[10px] tracking-[0.18em] text-slate-400/80">
+      <div className={`${hud ? '' : 'hidden'} absolute top-3 left-4 flex items-center gap-4 font-mono text-[10px] tracking-[0.18em] text-slate-400/80`}>
         <span ref={live} className="flex items-center gap-1.5 text-slate-500">
           <span className="w-1.5 h-1.5 rounded-full bg-slate-600" />
           <span>STBY</span>
@@ -142,7 +144,7 @@ export const CinematicOverlay: React.FC<CinematicOverlayProps> = ({ bridge, reco
         <span ref={shot} />
         <span ref={cam} className="text-slate-300/90" />
       </div>
-      <div className="absolute top-3 right-4 flex items-center gap-4 font-mono text-[10px] tracking-[0.18em] text-slate-400/80">
+      <div className={`${hud ? '' : 'hidden'} absolute top-3 right-4 flex items-center gap-4 font-mono text-[10px] tracking-[0.18em] text-slate-400/80`}>
         <span ref={clock} className="tabular-nums" />
         <span ref={fps} className="tabular-nums text-slate-500" />
       </div>

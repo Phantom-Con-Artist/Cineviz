@@ -18,6 +18,8 @@ interface CinematicViewportProps {
   exporter: VideoExporter | null;
   /** Floating panels drawn inside the frame (director panel, debug stats) */
   children?: React.ReactNode;
+  /** Show the monitor HUD (off on phones, which have their own) */
+  hud?: boolean;
 }
 
 const ASPECT = 16 / 9;
@@ -45,7 +47,7 @@ function useContainedFrame(ref: React.RefObject<HTMLDivElement | null>): { w: nu
  * The monitor: a 16:9 frame as large as the space allows, centred on black.
  * Everything else in the app is arranged around it.
  */
-export const CinematicViewport: React.FC<CinematicViewportProps> = React.memo(({ settings, bridge, debug, exporter, children }) => {
+export const CinematicViewport: React.FC<CinematicViewportProps> = React.memo(({ settings, bridge, debug, exporter, children, hud = true }) => {
   const area = useRef<HTMLDivElement>(null);
   const frame = useContainedFrame(area);
   // Export: same on-screen frame, drawing buffer scaled up to the export height
@@ -74,7 +76,7 @@ export const CinematicViewport: React.FC<CinematicViewportProps> = React.memo(({
           </Canvas>
         )}
 
-        <CinematicOverlay bridge={bridge} recording={!!exporter} />
+        <CinematicOverlay bridge={bridge} recording={!!exporter} hud={hud} />
 
         {settings.showRuleOfThirds && (
           <div className="pointer-events-none absolute inset-0 z-10">

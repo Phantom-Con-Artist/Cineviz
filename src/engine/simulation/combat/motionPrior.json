@@ -1,0 +1,458 @@
+{
+  "source": "CMU Graphics Lab Motion Capture Database (BVH conversion by B. Hahne)",
+  "clips": [
+    {
+      "id": "13_17",
+      "desc": "boxing",
+      "who": 13,
+      "frames": 4841,
+      "fps": 120,
+      "punch": 13
+    },
+    {
+      "id": "14_01",
+      "desc": "boxing",
+      "who": 14,
+      "frames": 5595,
+      "fps": 120,
+      "punch": 31
+    },
+    {
+      "id": "17_10",
+      "desc": "boxing",
+      "who": 17,
+      "frames": 2784,
+      "fps": 120,
+      "punch": 6
+    },
+    {
+      "id": "143_23",
+      "desc": "punching",
+      "who": 143,
+      "frames": 815,
+      "fps": 120,
+      "punch": 8
+    },
+    {
+      "id": "144_20",
+      "desc": "punch sequence",
+      "who": 144,
+      "frames": 2271,
+      "fps": 120,
+      "punch": 24
+    },
+    {
+      "id": "144_13",
+      "desc": "left punch sequence",
+      "who": 144,
+      "frames": 1947,
+      "fps": 120,
+      "punch": 19
+    },
+    {
+      "id": "135_09",
+      "desc": "karate: oi-zuki (lunge punch)",
+      "who": 135,
+      "frames": 2151,
+      "fps": 120,
+      "punch": 0
+    },
+    {
+      "id": "86_06",
+      "desc": "kicking, punching, knee kicking",
+      "who": 86,
+      "frames": 9940,
+      "fps": 120,
+      "punch": 15,
+      "kick": 3
+    },
+    {
+      "id": "135_04",
+      "desc": "karate: mae-geri (front kick)",
+      "who": 135,
+      "frames": 1317,
+      "fps": 120,
+      "kick": 3
+    },
+    {
+      "id": "135_07",
+      "desc": "karate: mawashi-geri (roundhouse kick)",
+      "who": 135,
+      "frames": 1473,
+      "fps": 120,
+      "kick": 4
+    },
+    {
+      "id": "135_11",
+      "desc": "karate: yoko-geri (side kick)",
+      "who": 135,
+      "frames": 2447,
+      "fps": 120,
+      "kick": 12
+    },
+    {
+      "id": "143_24",
+      "desc": "kicking",
+      "who": 143,
+      "frames": 1006,
+      "fps": 120,
+      "kick": 3
+    },
+    {
+      "id": "144_05",
+      "desc": "front kicking",
+      "who": 144,
+      "frames": 2787,
+      "fps": 120,
+      "kick": 12
+    },
+    {
+      "id": "144_09",
+      "desc": "left front kicking",
+      "who": 144,
+      "frames": 3383,
+      "fps": 120,
+      "kick": 12
+    },
+    {
+      "id": "144_07",
+      "desc": "left blocks",
+      "who": 144,
+      "frames": 2449,
+      "fps": 120,
+      "punch": 0
+    },
+    {
+      "id": "144_26",
+      "desc": "right blocks",
+      "who": 144,
+      "frames": 3348,
+      "fps": 120,
+      "punch": 0
+    }
+  ],
+  "punch": {
+    "count": 116,
+    "performers": [
+      13,
+      14,
+      17,
+      143,
+      144,
+      86
+    ],
+    "prepMs": {
+      "mean": 196.838,
+      "sd": 121.643,
+      "performerSd": 39.807,
+      "n": 116
+    },
+    "accelToImpactMs": {
+      "mean": 279.453,
+      "sd": 123.052,
+      "performerSd": 42.883,
+      "n": 116
+    },
+    "recoveryMs": {
+      "mean": 409.05,
+      "sd": 254.425,
+      "performerSd": 215.95,
+      "n": 116
+    },
+    "peakSpeed": {
+      "mean": 4.771,
+      "sd": 1.404,
+      "performerSd": 0.957,
+      "n": 116
+    },
+    "peakSpeedBeforeImpactMs": {
+      "mean": 82.615,
+      "sd": 27.759,
+      "performerSd": 15.725,
+      "n": 116
+    },
+    "chainPelvisMs": {
+      "mean": 183.835,
+      "sd": 100.771,
+      "performerSd": 24.987,
+      "n": 116
+    },
+    "chainTorsoMs": {
+      "mean": 156.609,
+      "sd": 103.896,
+      "performerSd": 53.717,
+      "n": 116
+    },
+    "chainProximalMs": {
+      "mean": 93.534,
+      "sd": 88.002,
+      "performerSd": 29.522,
+      "n": 116
+    },
+    "chainElbowOrKneeMs": {
+      "mean": 66.307,
+      "sd": 63.175,
+      "performerSd": 10.74,
+      "n": 116
+    },
+    "chainTipMs": {
+      "mean": 82.615,
+      "sd": 27.759,
+      "performerSd": 15.725,
+      "n": 116
+    },
+    "pelvisTurnDeg": {
+      "mean": 35.168,
+      "sd": 20.714,
+      "performerSd": 12.949,
+      "n": 116
+    },
+    "torsoTurnDeg": {
+      "mean": 56.725,
+      "sd": 23.397,
+      "performerSd": 12.193,
+      "n": 116
+    },
+    "counterTurnDeg": {
+      "mean": 7.528,
+      "sd": 9.956,
+      "performerSd": 5.142,
+      "n": 116
+    },
+    "comBackM": {
+      "mean": 0.048,
+      "sd": 0.059,
+      "performerSd": 0.045,
+      "n": 116
+    },
+    "comForwardAtImpactM": {
+      "mean": 0.033,
+      "sd": 0.065,
+      "performerSd": 0.039,
+      "n": 116
+    },
+    "comForwardAfterM": {
+      "mean": 0.01,
+      "sd": 0.109,
+      "performerSd": 0.044,
+      "n": 116
+    },
+    "leanDeg": {
+      "mean": 17.841,
+      "sd": 12.889,
+      "performerSd": 7.884,
+      "n": 116
+    },
+    "leanChangeDeg": {
+      "mean": 3.424,
+      "sd": 12.162,
+      "performerSd": 8.205,
+      "n": 116
+    },
+    "supportFootMoveM": {
+      "mean": 0.062,
+      "sd": 0.095,
+      "performerSd": 0.095,
+      "n": 116
+    },
+    "supportKneeFlexDeg": {
+      "mean": 0,
+      "sd": 0,
+      "performerSd": 0,
+      "n": 116
+    },
+    "nearMaxHoldMs": {
+      "mean": 71.192,
+      "sd": 41.73,
+      "performerSd": 22.359,
+      "n": 116
+    },
+    "extendCurve": [
+      0,
+      -0.024,
+      -0.028,
+      -0.005,
+      0.02,
+      0.075,
+      0.166,
+      0.34,
+      0.572,
+      0.863,
+      1
+    ],
+    "retractCurve": [
+      1,
+      0.895,
+      0.761,
+      0.617,
+      0.474,
+      0.347,
+      0.254,
+      0.171,
+      0.107,
+      0.049,
+      0
+    ]
+  },
+  "kick": {
+    "count": 49,
+    "performers": [
+      86,
+      135,
+      143,
+      144
+    ],
+    "prepMs": {
+      "mean": 404.42,
+      "sd": 117.996,
+      "performerSd": 95.517,
+      "n": 49
+    },
+    "accelToImpactMs": {
+      "mean": 536.562,
+      "sd": 158.613,
+      "performerSd": 98.989,
+      "n": 49
+    },
+    "recoveryMs": {
+      "mean": 675.167,
+      "sd": 243.028,
+      "performerSd": 157.894,
+      "n": 49
+    },
+    "peakSpeed": {
+      "mean": 6.249,
+      "sd": 1.824,
+      "performerSd": 1.127,
+      "n": 49
+    },
+    "peakSpeedBeforeImpactMs": {
+      "mean": 132.142,
+      "sd": 84.044,
+      "performerSd": 17.745,
+      "n": 49
+    },
+    "chainPelvisMs": {
+      "mean": 307.992,
+      "sd": 181.733,
+      "performerSd": 66.056,
+      "n": 49
+    },
+    "chainTorsoMs": {
+      "mean": 424.488,
+      "sd": 211.94,
+      "performerSd": 130.454,
+      "n": 49
+    },
+    "chainProximalMs": {
+      "mean": 299.659,
+      "sd": 191.233,
+      "performerSd": 88.364,
+      "n": 49
+    },
+    "chainElbowOrKneeMs": {
+      "mean": 134.863,
+      "sd": 159.875,
+      "performerSd": 42.423,
+      "n": 49
+    },
+    "chainTipMs": {
+      "mean": 132.142,
+      "sd": 84.044,
+      "performerSd": 17.745,
+      "n": 49
+    },
+    "pelvisTurnDeg": {
+      "mean": 35.549,
+      "sd": 23.834,
+      "performerSd": 15.633,
+      "n": 49
+    },
+    "torsoTurnDeg": {
+      "mean": 25.628,
+      "sd": 18.161,
+      "performerSd": 9.877,
+      "n": 49
+    },
+    "counterTurnDeg": {
+      "mean": 16.883,
+      "sd": 8.315,
+      "performerSd": 6.066,
+      "n": 49
+    },
+    "comBackM": {
+      "mean": 0.073,
+      "sd": 0.049,
+      "performerSd": 0.049,
+      "n": 49
+    },
+    "comForwardAtImpactM": {
+      "mean": 0.256,
+      "sd": 0.125,
+      "performerSd": 0.077,
+      "n": 49
+    },
+    "comForwardAfterM": {
+      "mean": 0.188,
+      "sd": 0.225,
+      "performerSd": 0.106,
+      "n": 49
+    },
+    "leanDeg": {
+      "mean": 5.924,
+      "sd": 22.17,
+      "performerSd": 15.966,
+      "n": 49
+    },
+    "leanChangeDeg": {
+      "mean": -8.152,
+      "sd": 15.909,
+      "performerSd": 10.574,
+      "n": 49
+    },
+    "supportFootMoveM": {
+      "mean": 0.128,
+      "sd": 0.132,
+      "performerSd": 0.082,
+      "n": 49
+    },
+    "supportKneeFlexDeg": {
+      "mean": 31.72,
+      "sd": 21.276,
+      "performerSd": 13.396,
+      "n": 49
+    },
+    "nearMaxHoldMs": {
+      "mean": 101.53,
+      "sd": 41.808,
+      "performerSd": 17.442,
+      "n": 49
+    },
+    "extendCurve": [
+      0,
+      0.176,
+      0.318,
+      0.139,
+      -0.193,
+      -0.276,
+      -0.108,
+      0.236,
+      0.582,
+      0.891,
+      1
+    ],
+    "retractCurve": [
+      1,
+      0.828,
+      0.467,
+      0.101,
+      -0.185,
+      -0.332,
+      -0.292,
+      -0.157,
+      -0.027,
+      0.027,
+      0
+    ]
+  }
+}

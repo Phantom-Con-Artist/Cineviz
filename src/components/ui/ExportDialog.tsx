@@ -38,7 +38,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ duration, hasTrack, 
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onMouseDown={onClose}>
-      <div className="w-[420px] max-w-[92vw] bg-[#0b0c10] border border-white/10 rounded-sm font-mono text-[11px] text-slate-400 shadow-2xl" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="w-[420px] max-w-[92vw] max-h-[94dvh] overflow-y-auto bg-[#0b0c10] border border-white/10 rounded-sm font-mono text-[11px] text-slate-400 shadow-2xl" onMouseDown={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-3 border-b border-white/[0.06]">
           <span className="tracking-[0.35em] text-slate-100">EXPORT</span>
           <button onClick={onClose} className="text-slate-500 hover:text-white">✕</button>

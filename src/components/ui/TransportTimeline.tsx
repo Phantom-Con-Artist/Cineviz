@@ -4,6 +4,8 @@ import { MusicTrackMetadata } from '../../types/music';
 import { formatClock } from './CinematicOverlay';
 
 interface TransportTimelineProps {
+  /** Phone landscape: play, time and scrubber only, over the picture */
+  compact?: boolean;
   bridge: EngineBridge | null;
   isPlaying: boolean;
   currentTime: number;
@@ -125,7 +127,9 @@ export const TransportTimeline: React.FC<TransportTimelineProps> = (p) => {
   const bpm = p.bridge?.getAnalysis()?.bpm ?? p.metadata?.bpm;
 
   return (
-    <div className="flex items-center gap-4 px-4 h-[68px] border-t border-white/[0.06] bg-[#08090c] font-mono text-[10px] text-slate-400">
+    <div className={p.compact
+      ? 'flex items-center gap-3 px-3 h-12 font-mono text-[10px] text-slate-300'
+      : 'flex items-center gap-4 px-4 h-[68px] border-t border-white/[0.06] bg-[#08090c] font-mono text-[10px] text-slate-400'}>
       {/* Transport */}
       <div className="flex items-center gap-1.5 shrink-0">
         <button
@@ -140,13 +144,13 @@ export const TransportTimeline: React.FC<TransportTimelineProps> = (p) => {
             <svg className="w-3.5 h-3.5 ml-0.5" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20" /></svg>
           )}
         </button>
-        <button onClick={p.onStop} disabled={p.locked} className="w-7 h-7 flex items-center justify-center text-slate-500 hover:text-white disabled:opacity-40" title="Stop">
+        <button onClick={p.onStop} disabled={p.locked} className={`w-7 h-7 items-center justify-center text-slate-500 hover:text-white disabled:opacity-40 ${p.compact ? 'hidden' : 'flex'}`} title="Stop">
           <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" /></svg>
         </button>
       </div>
 
       {/* Time */}
-      <div className="shrink-0 w-[92px] tabular-nums">
+      <div className={`shrink-0 tabular-nums ${p.compact ? 'w-[74px]' : 'w-[92px]'}`}>
         <div className="text-slate-100 text-[12px]">{formatClock(p.currentTime)}</div>
         <div className="text-slate-600">{formatClock(p.duration, false)}</div>
       </div>
@@ -186,7 +190,7 @@ export const TransportTimeline: React.FC<TransportTimelineProps> = (p) => {
       </div>
 
       {/* Track + load */}
-      <div className="relative shrink-0 w-44 hidden md:block">
+      <div className={`relative shrink-0 w-44 hidden ${p.compact ? '' : 'md:block'}`}>
         <button
           onClick={() => setMenu((m) => !m)}
           disabled={p.locked}
@@ -219,7 +223,7 @@ export const TransportTimeline: React.FC<TransportTimelineProps> = (p) => {
       </div>
 
       {/* Volume */}
-      <div className="shrink-0 hidden lg:flex items-center gap-2 w-28" title="Monitor volume">
+      <div className={`shrink-0 hidden items-center gap-2 w-28 ${p.compact ? '' : 'lg:flex'}`} title="Monitor volume">
         <svg className="w-3.5 h-3.5 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" /><path d="M15.5 8.5a5 5 0 0 1 0 7" /></svg>
         <input type="range" min={0} max={1} step={0.01} value={p.volume} onChange={(e) => p.onVolume(Number(e.target.value))} className="flex-1 slim" />
       </div>

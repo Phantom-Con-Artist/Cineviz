@@ -6,6 +6,7 @@ import { CreativeStrip } from '../components/ui/CreativeStrip';
 import { DirectorPanel } from '../components/ui/DirectorPanel';
 import { DebugPanel } from '../components/ui/DebugPanel';
 import { ExportDialog } from '../components/ui/ExportDialog';
+import { MobileShell, RotatePrompt, useCompactLayout } from '../components/ui/MobileShell';
 import { formatClock } from '../components/ui/CinematicOverlay';
 import { AudioEngine } from '../audio/AudioEngine';
 import { EngineBridge } from '../engine/EngineBridge';
@@ -191,6 +192,7 @@ export const WorkstationLayout: React.FC = () => {
   }, []);
 
   const locked = !!exporter;
+  const { compact, portraitPhone } = useCompactLayout();
 
   const handleCreativeParamsChange = (p: CreativeParameters) => {
     setCreativeParams(p);
@@ -245,8 +247,92 @@ export const WorkstationLayout: React.FC = () => {
     }
   };
 
+  const exportBar = exportStatus && (
+    <div className="absolute top-0 inset-x-0 z-30 flex items-center gap-4 px-4 h-8 bg-black/80 border-b border-red-500/20 font-mono text-[10px] tracking-[0.2em] text-slate-300">
+      {exportStatus.phase === 'recording' && exporter && (
+        <>
+          <span className="text-red-400">● REC</span>
+          <span className="hidden sm:inline">
+            {exporter.options.width}×{exporter.options.height} · {exporter.options.frameRate} FPS · {exporter.options.format.label}
+          </span>
+          <div className="flex-1 h-px bg-white/10">
+            <div className="h-px bg-red-400" style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }} />
+          </div>
+          <span className="tabular-nums">{formatClock(currentTime, false)} / {formatClock(duration, false)}</span>
+          <button onClick={cancelExport} className="text-slate-400 hover:text-white">CANCEL</button>
+        </>
+      )}
+      {exportStatus.phase === 'encoding' && <span>FINALISING VIDEO…</span>}
+      {exportStatus.phase === 'error' && (
+        <>
+          <span className="text-red-400">EXPORT FAILED</span>
+          <span className="truncate">{exportStatus.message}</span>
+          <div className="flex-1" />
+          <button onClick={() => setExportStatus(null)} className="text-slate-400 hover:text-white">DISMISS</button>
+        </>
+      )}
+    </div>
+  );
+
+  const timeline = (compactTimeline: boolean) => (
+    <TransportTimeline
+      compact={compactTimeline}
+      bridge={bridge}
+      isPlaying={isPlaying}
+      currentTime={currentTime}
+      duration={duration}
+      volume={volume}
+      metadata={trackMeta}
+      analyzing={analyzing}
+      analysisVersion={analysisVersion}
+      locked={locked}
+      sampleTracks={SAMPLE_TRACKS}
+      onPlay={handlePlay}
+      onPause={handlePause}
+      onStop={handleStop}
+      onSeek={handleSeek}
+      onVolume={handleVolume}
+      onFile={(f) => void load((a) => a.load(f))}
+      onSample={(url, title) => void load((a) => a.load(url, title))}
+      onDemo={() => void load((a) => a.loadSyntheticDemoTrack())}
+    />
+  );
+
+  const dialog = exportOpen && (
+    <ExportDialog duration={duration} hasTrack={!!trackMeta} onClose={() => setExportOpen(false)} onStart={(o) => void startExport(o)} />
+  );
+  const openExport = () => (locked ? undefined : setExportOpen(true));
+
+  if (compact) {
+    return (
+      <>
+        <MobileShell
+          bridge={bridge}
+          viewport={<CinematicViewport settings={viewportSettings} bridge={bridge} debug={false} exporter={exporter} hud={false} />}
+          timeline={timeline(true)}
+          creative={<CreativeStrip layout="sheet" parameters={creativeParams} onChange={handleCreativeParamsChange} onReset={handleResetDefaults} />}
+          exportBar={exportBar}
+          matchup={matchup}
+          trackTitle={trackMeta?.title ?? null}
+          isPlaying={isPlaying}
+          locked={locked}
+          exporting={locked}
+          directorOpen={directorOpen}
+          onDirector={() => setDirectorOpen((o) => !o)}
+          onPlayPause={() => playRef.current()}
+          onExport={openExport}
+          sampleTracks={SAMPLE_TRACKS}
+          onFile={(f) => void load((a) => a.load(f))}
+          onSample={(url, title) => void load((a) => a.load(url, title))}
+          onDemo={() => void load((a) => a.loadSyntheticDemoTrack())}
+        />
+        {dialog}
+      </>
+    );
+  }
+
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#050608] text-slate-200 select-none">
+    <div className="flex flex-col h-[100dvh] w-screen overflow-hidden bg-[#050608] text-slate-200 select-none">
       <TopBar
         matchup={matchup}
         palette={palette}
@@ -259,7 +345,7 @@ export const WorkstationLayout: React.FC = () => {
         debug={debug}
         onDebug={() => setDebug((d) => !d)}
         exporting={locked}
-        onExport={() => (locked ? undefined : setExportOpen(true))}
+        onExport={openExport}
         locked={locked}
       />
 
@@ -268,60 +354,14 @@ export const WorkstationLayout: React.FC = () => {
           {bridge && <DirectorPanel bridge={bridge} open={directorOpen} onToggle={() => setDirectorOpen((o) => !o)} />}
           {bridge && debug && <DebugPanel bridge={bridge} settings={viewportSettings} onSettings={setViewportSettings} />}
         </CinematicViewport>
-
-        {exportStatus && (
-          <div className="absolute top-0 inset-x-0 z-30 flex items-center gap-4 px-4 h-8 bg-black/80 border-b border-red-500/20 font-mono text-[10px] tracking-[0.2em] text-slate-300">
-            {exportStatus.phase === 'recording' && exporter && (
-              <>
-                <span className="text-red-400">● REC</span>
-                <span>
-                  {exporter.options.width}×{exporter.options.height} · {exporter.options.frameRate} FPS · {exporter.options.format.label}
-                </span>
-                <div className="flex-1 h-px bg-white/10">
-                  <div className="h-px bg-red-400" style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }} />
-                </div>
-                <span className="tabular-nums">{formatClock(currentTime, false)} / {formatClock(duration, false)}</span>
-                <button onClick={cancelExport} className="text-slate-400 hover:text-white">CANCEL</button>
-              </>
-            )}
-            {exportStatus.phase === 'encoding' && <span>FINALISING VIDEO…</span>}
-            {exportStatus.phase === 'error' && (
-              <>
-                <span className="text-red-400">EXPORT FAILED</span>
-                <span className="truncate">{exportStatus.message}</span>
-                <div className="flex-1" />
-                <button onClick={() => setExportStatus(null)} className="text-slate-400 hover:text-white">DISMISS</button>
-              </>
-            )}
-          </div>
-        )}
+        {exportBar}
       </main>
 
-      <TransportTimeline
-        bridge={bridge}
-        isPlaying={isPlaying}
-        currentTime={currentTime}
-        duration={duration}
-        volume={volume}
-        metadata={trackMeta}
-        analyzing={analyzing}
-        analysisVersion={analysisVersion}
-        locked={locked}
-        sampleTracks={SAMPLE_TRACKS}
-        onPlay={handlePlay}
-        onPause={handlePause}
-        onStop={handleStop}
-        onSeek={handleSeek}
-        onVolume={handleVolume}
-        onFile={(f) => void load((a) => a.load(f))}
-        onSample={(url, title) => void load((a) => a.load(url, title))}
-        onDemo={() => void load((a) => a.loadSyntheticDemoTrack())}
-      />
+      {timeline(false)}
       <CreativeStrip parameters={creativeParams} onChange={handleCreativeParamsChange} onReset={handleResetDefaults} />
 
-      {exportOpen && (
-        <ExportDialog duration={duration} hasTrack={!!trackMeta} onClose={() => setExportOpen(false)} onStart={(o) => void startExport(o)} />
-      )}
+      {dialog}
+      {portraitPhone && <RotatePrompt />}
     </div>
   );
 };

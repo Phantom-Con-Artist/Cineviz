@@ -104,3 +104,21 @@ input[type="range"].slim::-moz-range-track {
   height: 2px;
   background: rgba(255, 255, 255, 0.1);
 }
+
+/* Touch screens: bigger thumbs and more room to grab them */
+@media (pointer: coarse) {
+  input[type="range"].slim {
+    height: 3px;
+    margin: 13px 0 9px;
+  }
+
+  input[type="range"].slim::-webkit-slider-thumb {
+    width: 20px;
+    height: 20px;
+  }
+
+  input[type="range"].slim::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
+  }
+}
