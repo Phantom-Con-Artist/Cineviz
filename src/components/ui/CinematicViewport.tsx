@@ -7,6 +7,7 @@ import { PostProcessingEffects } from '../../engine/rendering/effects/PostProces
 import { ExportCapture } from '../../engine/export/ExportCapture';
 import { VideoExporter } from '../../engine/export/VideoExporter';
 import { CinematicOverlay } from './CinematicOverlay';
+import { AdaptivePerformance } from '../../engine/rendering/AdaptivePerformance';
 import { ViewportSettings } from '../../types/engine';
 import { EngineBridge } from '../../engine/EngineBridge';
 
@@ -78,6 +79,7 @@ export const CinematicViewport: React.FC<CinematicViewportProps> = React.memo(({
             <FightScene bridge={bridge} cameraMode={settings.cameraMode} />
             {debug && <DebugScene bridge={bridge} cameraMode={settings.cameraMode} />}
             <PostProcessingEffects enabled={effects} bridge={bridge} />
+            {!exporter && <AdaptivePerformance bridge={bridge} />}
             {exporter && <ExportCapture bridge={bridge} exporter={exporter} />}
           </Canvas>
         )}

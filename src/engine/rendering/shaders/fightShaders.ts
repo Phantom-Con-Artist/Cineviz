@@ -28,6 +28,7 @@ const PARTICLE_VERT = /* glsl */ `
   uniform float uScale;
   uniform float uPixelRatio;
   uniform float uGlowPass;
+  uniform float uGlowSize;
   attribute vec3 aColor;
   attribute float aSize;
   attribute float aAlpha;
@@ -50,7 +51,7 @@ const PARTICLE_VERT = /* glsl */ `
     float s = uScale * uPixelRatio * aSize / max(0.25, -mv.z);
     vColor = aColor;
     if (uGlowPass > 0.5) {
-      gl_PointSize = clamp(s * 3.6, 2.0, 96.0);
+      gl_PointSize = clamp(s * uGlowSize, 2.0, 96.0);
       vAlpha = aAlpha * 0.12 * tw;
     } else {
       gl_PointSize = clamp(s, 1.0, 72.0);
@@ -300,7 +301,7 @@ function base(vertexShader: string, uniforms: Record<string, THREE.IUniform>, so
 }
 
 export function createParticleMaterials(): { main: THREE.ShaderMaterial; glow: THREE.ShaderMaterial } {
-  const main = base(PARTICLE_VERT, { uGlowPass: { value: 0 } }, 0.15, 0.45);
+  const main = base(PARTICLE_VERT, { uGlowPass: { value: 0 }, uGlowSize: { value: 3.6 } }, 0.15, 0.45);
   // Shares the uniform objects, so every update reaches both passes
   const glow = new THREE.ShaderMaterial({
     vertexShader: PARTICLE_VERT,

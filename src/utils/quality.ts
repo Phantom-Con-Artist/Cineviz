@@ -26,8 +26,21 @@ function gpuName(): string | null {
   }
 }
 
+/**
+ * An integrated GPU (laptop Radeon / Vega, Intel UHD / Iris): it shares memory with the CPU
+ * and has little fill rate, so it gets its own profile (native resolution at most, a
+ * lighter bloom, smaller buffers) and the adaptive scaler starts from there.
+ */
+export function isIntegrated(name: string | null): boolean {
+  const n = (name || '').toLowerCase();
+  if (/radeon rx|radeon pro|nvidia|geforce|rtx|gtx|quadro|arc a\d/.test(n)) return false;
+  return /radeon\(tm\) graphics|radeon graphics|vega|intel|iris|uhd graphics/.test(n);
+}
+
 export interface RenderBudget {
   tier: number;
+  /** Integrated GPU: lighter post-processing and glow, lower resolution ceiling */
+  integrated: boolean;
   /** Points per fighter body */
   body: number;
   /** Points per shadow clone */
@@ -51,7 +64,12 @@ export interface RenderBudget {
   dpr: [number, number];
 }
 
-const TIERS: Omit<RenderBudget, 'tier'>[] = [
+/** Laptop integrated graphics: between the light and the middle tier, capped at native resolution */
+const INTEGRATED: Omit<RenderBudget, 'tier' | 'integrated'> = {
+  body: 4200, clone: 1800, weapon: 1000, fx: 18000, sparks: 4000, pet: 1600, morph: 4600, dragon: 3200, bolts: 1100, arms: 9000, dpr: [0.75, 1],
+};
+
+const TIERS: Omit<RenderBudget, 'tier' | 'integrated'>[] = [
   { body: 3400, clone: 1600, weapon: 900, fx: 16000, sparks: 3500, pet: 1400, morph: 4000, dragon: 2800, bolts: 900, arms: 11000, dpr: [1, 1.25] },
   { body: 4800, clone: 2200, weapon: 1200, fx: 24000, sparks: 5000, pet: 1900, morph: 5500, dragon: 4000, bolts: 1400, arms: 16000, dpr: [1, 1.5] },
   { body: 6800, clone: 3000, weapon: 1600, fx: 34000, sparks: 7000, pet: 2600, morph: 7500, dragon: 5600, bolts: 2000, arms: 24000, dpr: [1, 2] },
@@ -102,6 +120,10 @@ export function defaultFxLevel(tier: number): FxLevel {
 
 export function detectBudget(): RenderBudget {
   const nav = navigator as Navigator & { deviceMemory?: number };
-  const tier = gpuTier(gpuName(), nav.hardwareConcurrency || 4, nav.deviceMemory || 8);
-  return { tier, ...TIERS[tier]! };
+  const name = gpuName();
+  const tier = gpuTier(name, nav.hardwareConcurrency || 4, nav.deviceMemory || 8);
+  // ?gpu=integrated forces the laptop profile (for testing on a big GPU)
+  const forced = new URLSearchParams(location.search).get('gpu');
+  const integrated = forced ? forced === 'integrated' : tier <= 1 && isIntegrated(name);
+  return integrated ? { tier: Math.min(tier, 1), integrated, ...INTEGRATED } : { tier, integrated, ...TIERS[tier]! };
 }

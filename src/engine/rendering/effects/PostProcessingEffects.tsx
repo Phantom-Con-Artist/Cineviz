@@ -39,6 +39,19 @@ export const PostProcessingEffects: React.FC<PostProcessingEffectsProps> = ({ en
 
   if (!enabled) return null;
 
+  // Integrated graphics: a shorter bloom mip chain (the costliest part of the chain) and no grain
+  if (bridge.budget.integrated) {
+    return (
+      <EffectComposer multisampling={0}>
+        <Bloom ref={bloom} mipmapBlur levels={5} luminanceThreshold={0.2} luminanceSmoothing={0.3} intensity={1.3} radius={0.72} />
+        <ChromaticAberration ref={chroma} offset={offset.current} radialModulation modulationOffset={0.2} />
+        <HueSaturation ref={hue} saturation={0} />
+        <BrightnessContrast ref={bc} brightness={0} contrast={0.08} />
+        <Vignette ref={vig} eskil={false} offset={0.22} darkness={0.8} />
+      </EffectComposer>
+    );
+  }
+
   return (
     <EffectComposer multisampling={0}>
       <Bloom ref={bloom} mipmapBlur luminanceThreshold={0.18} luminanceSmoothing={0.3} intensity={1.3} radius={0.78} />

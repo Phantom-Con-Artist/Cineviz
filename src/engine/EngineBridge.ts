@@ -48,6 +48,12 @@ export class EngineBridge {
   private lastSerial = 0;
   /** Effect quality (LOW … ULTRA): never changes the choreography, only how much is drawn */
   public fxLevel: FxLevel = 'HIGH';
+  /** The adaptive scaler may lower the effect level until the viewer picks one themselves */
+  public autoFx = true;
+  /** Told when the effect level changes on its own (the UI shows it) */
+  public onFxLevel: ((level: FxLevel) => void) | null = null;
+  /** Measured frame rate and current render scale (AdaptivePerformance) */
+  public readonly perf = { fps: 60, scale: 1 };
 
   private seed = 42819;
   /** Seed of the current show: fresh every time a song starts over, unless the choreography is locked */
@@ -144,9 +150,11 @@ export class EngineBridge {
     this.params = normalize(params);
   }
 
-  public setFxLevel(level: FxLevel): void {
+  public setFxLevel(level: FxLevel, auto = false): void {
     this.fxLevel = level;
     this.particles.setFxLevel(level);
+    if (auto) this.onFxLevel?.(level);
+    else this.autoFx = false;
   }
 
   public setCameraMode(mode: CameraMode): void {

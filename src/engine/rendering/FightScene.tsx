@@ -246,6 +246,8 @@ export const FightScene: React.FC<FightSceneProps> = ({ bridge, cameraMode }) =>
       m.uniforms.uScale!.value = scale;
     }
     mats.main.uniforms.uTime!.value = simT;
+    // The glow halo pass is pure fill rate: smaller on integrated graphics (bloom covers the rest)
+    mats.main.uniforms.uGlowSize!.value = bridge.budget.integrated ? 2.3 : 3.6;
     mats.stars.uniforms.uTime!.value = state.clock.elapsedTime;
     mats.bokeh.uniforms.uTime!.value = state.clock.elapsedTime;
     mats.rocks.uniforms.uTime!.value = simT;

@@ -76,6 +76,7 @@ export const WorkstationLayout: React.FC = () => {
   useEffect(() => {
     if (!bridge) return;
     setFxLevelState(bridge.fxLevel);
+    bridge.onFxLevel = setFxLevelState;
   }, [bridge]);
   const onFxLevel = useCallback((l: FxLevel) => {
     setFxLevelState(l);
