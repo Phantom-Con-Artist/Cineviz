@@ -2,6 +2,9 @@
   "name": "cinematic-music-visualizer",
   "private": true,
   "version": "1.0.0",
+  "description": "Anime fights, choreographed to your music.",
+  "author": "Subhradeep Sarkar",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",

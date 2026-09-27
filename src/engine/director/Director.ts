@@ -15,7 +15,9 @@ export type ShotKind =
   /** Worm's-eye: lens on the ground behind the caster, looking up at what towers over them */
   | 'colossus'
   /** Scale reveal: a long lens from far away, the fighters specks under the power (slow dolly zoom) */
-  | 'titan';
+  | 'titan'
+  /** The end: a slow orbit round the ruined arena, facing the winner's weapon in the ground */
+  | 'finale';
 
 /** The cinematographic grammar every concrete shot belongs to */
 export type ShotType = 'WIDE' | 'TWO_SHOT' | 'FOLLOW' | 'CLOSE_UP' | 'IMPACT' | 'ORBIT' | 'LOW_ANGLE' | 'HIGH_ANGLE';
@@ -24,18 +26,18 @@ const SHOT_LABEL: Record<ShotKind, string> = {
   establish: 'ESTABLISHING', walk: 'TRACKING WALK', wide: 'WIDE MASTER', medium: 'MEDIUM DUEL', ots: 'OVER SHOULDER',
   close: 'CLOSE UP', hero: 'LOW HERO', god: 'GOD VIEW', orbit: 'BULLET TIME', tracking: 'TRACKING', aerial: 'AERIAL',
   beam: 'BEAM WIDE', requiem: 'REQUIEM', summon: 'SUMMON', pet: 'FAMILIAR', impact: 'IMPACT', follow: 'FOLLOW', vista: 'EXTREME WIDE',
-  colossus: "WORM'S EYE", titan: 'SCALE REVEAL',
+  colossus: "WORM'S EYE", titan: 'SCALE REVEAL', finale: 'FINALE',
 };
 
 const SHOT_TYPE: Record<ShotKind, ShotType> = {
   establish: 'WIDE', walk: 'FOLLOW', wide: 'WIDE', medium: 'TWO_SHOT', ots: 'TWO_SHOT', close: 'CLOSE_UP', hero: 'LOW_ANGLE',
   god: 'HIGH_ANGLE', orbit: 'ORBIT', tracking: 'FOLLOW', aerial: 'TWO_SHOT', beam: 'WIDE', requiem: 'HIGH_ANGLE',
-  summon: 'WIDE', pet: 'WIDE', impact: 'IMPACT', follow: 'FOLLOW', vista: 'WIDE', colossus: 'LOW_ANGLE', titan: 'WIDE',
+  summon: 'WIDE', pet: 'WIDE', impact: 'IMPACT', follow: 'FOLLOW', vista: 'WIDE', colossus: 'LOW_ANGLE', titan: 'WIDE', finale: 'ORBIT',
 };
 
 /** Default blend into a shot (seconds): impacts snap in, wides drift */
 const TRANSITION: Partial<Record<ShotKind, number>> = {
-  impact: 0.18, vista: 1.6, colossus: 1.1, titan: 1.8, close: 0.55, follow: 0.7, orbit: 0.5, hero: 0.9, wide: 1.1, establish: 1.4, god: 1.2, requiem: 1,
+  impact: 0.18, vista: 1.6, colossus: 1.1, titan: 1.8, finale: 2.5, close: 0.55, follow: 0.7, orbit: 0.5, hero: 0.9, wide: 1.1, establish: 1.4, god: 1.2, requiem: 1,
 };
 
 /** Handheld drift per shot type (metres of camera sway) */
@@ -740,7 +742,7 @@ export class Director {
     // Never stay close while an arena-scale power plays: its scale must read
     if (this.clock < this.epic.until) {
       const posing = kind === 'hero' && this.clock < this.auraUntil;
-      if (!posing && kind !== 'vista' && kind !== 'god' && kind !== 'requiem' && kind !== 'colossus' && kind !== 'titan') kind = 'vista';
+      if (!posing && kind !== 'vista' && kind !== 'god' && kind !== 'requiem' && kind !== 'colossus' && kind !== 'titan' && kind !== 'finale') kind = 'vista';
     }
     const s = this.shot;
     const same = s.kind === kind && (s.subject === subject || GROUP_SHOT.has(kind));
@@ -839,6 +841,13 @@ export class Director {
       this.phrase = 'intro';
       this.queue.length = 0;
       if (this.shot.kind !== 'establish') this.setShot('establish', 0, false);
+    } else if (eng.monument) {
+      // The song is over: one last long take
+      if (this.shot.kind !== 'finale') {
+        this.queue.length = 0;
+        this.epic.until = -1;
+        this.setShot('finale', 0, false, eng);
+      }
     } else if (this.queue.length && this.queue[0]!.at <= this.clock) {
       // Planned sequence: next booked shot
       const b = this.queue.shift()!;
@@ -1335,6 +1344,20 @@ export class Director {
         w.dist = Math.min(95, ((R * 1.25) / t0) * (t0 / Math.tan((w.fov * Math.PI) / 360)));
         // Just above the ground, the horizon low in frame: everything towers
         w.pitch = Math.atan2(1.2 - w.fy, w.dist) + 0.02;
+        break;
+      }
+      case 'finale': {
+        // Opens close on the weapon going into the ground, then pulls out and up into a slow
+        // orbit: the blade small at the bottom of the frame, the broken sky filling the rest
+        const m = eng.monument ?? [mx, 0, mz];
+        const out = smoothstep(2.5, 9, τ);
+        w.fx = m[0]!;
+        w.fz = m[2]!;
+        w.fy = lerp(1.1, 7, out);
+        w.yaw = s.startYaw + τ * 0.09 * side;
+        w.pitch = lerp(0.2, 0.1, out);
+        w.dist = lerp(4.5, 24, out);
+        w.fov = lerp(42, 60, out);
         break;
       }
       case 'pet': {

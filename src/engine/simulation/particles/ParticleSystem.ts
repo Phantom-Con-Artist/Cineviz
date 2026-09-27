@@ -791,7 +791,8 @@ export class ParticleSystem {
       this.hiddenPrev[k] = f.hidden;
       if (!f.present && body.vis < 0.01 && !body.dissolving) {
         body.hide(o);
-        this.weapons[k]!.update(dt, t, f, c, o);
+        // A weapon left planted keeps standing after its owner is gone
+        this.weapons[k]!.update(dt, t, f, c, o, eng.beat);
         return;
       }
       const aura = prm.aura * (0.2 + 0.25 * heat + 0.35 * music.energy * heat + this.auraPulse * 0.25) + f.auraBoost * 0.7 + f.superMode * 0.5;

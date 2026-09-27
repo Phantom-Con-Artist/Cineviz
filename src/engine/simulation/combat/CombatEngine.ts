@@ -329,6 +329,19 @@ export class Clone extends Actor {
   phantom = false;
 }
 
+/** A weapon that can stand in the ground (pairs give one blade, bows / floating / thrown ones a sword) */
+function plantForm(form: WeaponType, signature: WeaponType | null): WeaponType {
+  const single: Partial<Record<WeaponType, WeaponType>> = { dualSwords: 'blade', dualKatanas: 'katana', dualAxes: 'axe', swordShield: 'blade', twinDaggers: 'kunai' };
+  const ok = new Set<WeaponType>([
+    'blade', 'katana', 'greatsword', 'longsword', 'rapier', 'saber', 'scimitar', 'spear', 'greatSpear', 'halberd', 'glaive', 'scythe',
+    'naginata', 'staff', 'bo', 'axe', 'greatAxe', 'hammer', 'warhammer', 'mace', 'energyBlade', 'energySpear', 'particleBlade', 'twinblade',
+  ]);
+  const f = single[form] ?? form;
+  if (ok.has(f)) return f;
+  if (signature && ok.has(signature)) return signature;
+  return 'greatsword';
+}
+
 export class Projectile {
   active = false;
   owner = 0;
@@ -432,6 +445,8 @@ export class CombatEngine {
   readonly arena = new ArenaState();
   /** The world wearing down as the fight goes on (see powers/Ruin.ts) */
   readonly ruin = new Ruin();
+  /** Where the winner's weapon stands in the ground once the song is over (the last shot circles it) */
+  monument: Vector3Tuple | null = null;
   private showSeed = 0;
   readonly events: CombatEvent[] = [];
   /**
@@ -484,6 +499,7 @@ export class CombatEngine {
     this.rng = new SeededRandom(seed);
     this.showSeed = seed;
     this.ruin.reset(seed);
+    this.monument = null;
     this.running = false;
     this.timeline.length = 0;
     this.events.length = 0;
@@ -578,6 +594,7 @@ export class CombatEngine {
     for (const p of this.pets) p.active = false;
     this.clearSpecials();
     this.arena.reset();
+    this.monument = null;
     for (const d of this.dragons) d.active = false;
     const ang = this.rng.range(0, Math.PI);
     Object.assign(this.stage, { cx: 0, cz: 0, ang, sep: 22, tcx: 0, tcz: 0, tang: ang, tsep: 22, rate: 2, angVel: 0, crate: 0.8, lin: 0 });
@@ -603,6 +620,7 @@ export class CombatEngine {
   resync(beat: number, fresh = false): void {
     // Jumping back rebuilds the world (it wears down again from there)
     if (beat < this.beat - 8) this.ruin.reset(this.showSeed);
+    this.monument = null;
     this.timeline.length = 0;
     this.pending = null;
     this.clearSpecials();
@@ -637,8 +655,31 @@ export class CombatEngine {
     this.timeline.length = 0;
     this.clearSpecials();
     const b = this.beat;
+    // The last one standing drives a weapon into the ground as a marker of the fight, then goes
+    const standing = this.fighters.filter((f) => f.present && !f.dead).sort((x, y) => y.health - x.health);
+    const W = standing[0];
+    if (W) {
+      const spot: Vector3Tuple = [W.x + Math.cos(W.facing) * 1.1, 0, W.z + Math.sin(W.facing) * 1.1];
+      this.monument = spot;
+      W.setStance('guard');
+      this.at(b + 0.2, () => {
+        W.weapon = plantForm(W.weaponSet.form, W.arch.weapon);
+        if (!W.weaponOn) this.drawWeapon(W);
+      });
+      this.play(W, 'w_plant', b + 0.9, 1);
+      this.releaseWeapon(W, b + 1.6, 0.3, () => spot, 0.15);
+      this.at(b + 1.9, () => this.emit('slam', [spot[0], 0.05, spot[2]], [0, -1, 0], 0.8, W.team, 1 - W.team));
+      this.at(b + 2.6, () => {
+        W.setStance('relaxed');
+        W.play(MOVES.bow, b + 2.6, 1);
+      });
+      this.at(b + 4, () => {
+        W.present = false;
+        this.emit('fade_out', W.joint(J.chest), UP, 1, W.team, 1 - W.team);
+      });
+    }
     for (const f of this.fighters) {
-      if (!f.present || f.dead) continue;
+      if (!f.present || f.dead || f === W) continue;
       f.setStance('relaxed');
       f.play(MOVES.bow, b, 1);
       this.at(b + 1.2, () => {
