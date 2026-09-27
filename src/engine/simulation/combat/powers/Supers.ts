@@ -220,15 +220,17 @@ const lightningStep: TechDef = {
     // Lightning becomes the aura: every flash step leaves arcs along its path
     e.setForm(A, 'lightning', s + 0.8, s + 7);
     const light = A.weaponOn ? (A.signature ? A.arch.light : A.vocab.light) : A.arch.light;
+    // Close-range blows only (a ranged vocabulary may have none: then fists)
+    const melee = light.filter((n) => n !== 'w_quickShot' && n !== 'w_command');
     let t = s + 1.2;
     for (let k = 0; k < 4; k++) {
       e.teleport(A, D, (k % 2 ? 1 : -1) * e.rng.range(1.4, 2.4), 1.35, t);
-      e.strike(A, D, e.rng.choice(light.filter((n) => n !== 'w_quickShot' && n !== 'w_command')) ?? 'jab', t + 0.7, 0.5, k === 3 ? 'hit' : e.rng.boolean(0.7) ? 'hit' : 'parry', { damage: 3, knock: 0.6, element: 'lightning' });
+      e.strike(A, D, melee.length ? e.rng.choice(melee) : 'jab', t + 0.7, 0.5, k === 3 ? 'hit' : e.rng.boolean(0.7) ? 'hit' : 'parry', { damage: 3, knock: 0.6, element: 'lightning' });
       t += 0.9;
     }
     P.released(s + 1.2);
     e.velocityBreak(A, D, s + 4.4);
-    e.strike(A, D, e.rng.choice(A.arch.heavy), s + 5, 0.6, 'hit', { critical: true, damage: 11, element: 'lightning', react: 'launched' });
+    e.strike(A, D, e.rng.choice(A.pool('heavy')), s + 5, 0.6, 'hit', { critical: true, damage: 11, element: 'lightning', react: 'launched' });
     P.impact(s + 5);
     return 8;
   },

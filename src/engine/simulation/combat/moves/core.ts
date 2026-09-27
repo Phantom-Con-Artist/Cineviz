@@ -111,7 +111,7 @@ export const CORE = {
     { twist: -1.05, rShP: 1.35, rEl: 0.1, lean: 0.3, rootX: 0.3 }),
   thrust: swing(
     { twist: 0.8, rShP: 0.9, rEl: 1.9, lean: -0.1 },
-    { twist: -0.6, rShP: 1.55, rEl: 0.02, lean: 0.45, rootX: 0.5, lKn: 0.9, rHipP: -0.6 }),
+    { twist: -0.6, rShP: 1.55, rEl: 0.02, lean: 0.45, rootX: 0.5, lKn: 0.9, rHipP: -0.6 }, { thrust: true }),
   summon: seq(
     K(0.6, { rShP: 2.95, rShA: 0.2, rEl: 0.15, head: -0.45, lean: -0.12, lShP: 0.1, lEl: 0.3 }, 'out'),
     K(1.4, { rShP: 2.9, rShA: 0.25, rEl: 0.2, head: -0.35, lean: -0.1 })),

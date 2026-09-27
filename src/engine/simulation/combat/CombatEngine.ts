@@ -1,15 +1,19 @@
 import { CombatEvent, CombatEventType, PhraseKind, Vector3Tuple } from '../../../types/cinematic';
 import { MusicState } from '../../../types/music';
+import type { SectionType } from '../../../audio/analysis/types';
 import { FightFlavor, FLAVORS } from './Flavors';
 import { SeededRandom } from '../../../utils/random';
 import { clamp, damp, dampAngle, smoothstep, wobble, wrapAngle } from '../../../utils/math';
-import { DEFAULT_DIMS, DEFAULT_PROPORTIONS, Dims, dimsOf, FRAME_STRIDE, J, JOINT_COUNT, P, PARAM_COUNT, Proportions, SEG_COUNT, solvePose } from './Skeleton';
-import { Element, MOVES, MoveDef, MoveInstance, MoveName, reachOf, SLASHES, STANCE, StanceName, Zone } from './Moves';
+import { DEFAULT_DIMS, DEFAULT_PROPORTIONS, Dims, dimsOf, FRAME_STRIDE, J, JOINT_COUNT, makePose, P, PARAM_COUNT, Proportions, SEG, SEG_COUNT, solvePose } from './Skeleton';
+import { accentOf, Element, isSwing, MOVES, MoveDef, MoveInstance, MoveName, reachOf, SLASHES, STANCE, StanceName, swingFollow, windOf, Zone } from './Moves';
 import { Pet, PET_KINDS, Summon, SUMMON_STYLE, SummonKind } from './Entities';
 import { Archetype, ArchetypeId, ARCHETYPE_IDS, ARCHETYPES, TechId, WEAPON_LENGTH, WeaponType } from './Archetypes';
 import { FxAnchor, FxKind, TechFx } from './TechFx';
 import { TECHNIQUES } from './Techniques';
-import { DEFAULT_PROFILE, MotionBody, PROFILES } from './Motion';
+import { DEFAULT_PROFILE, GROOVE, HitRegion, MotionBody, PROFILES } from './Motion';
+import { BodyConstraints, TWO_HAND_GRIP } from './Constraints';
+import { exitPose, pickByPose } from './PoseMatch';
+import { SWING_LAYER } from './BladePath';
 import { BUILDS } from '../figure/Builds';
 import { setOfForm, vocabulary, Vocabulary, weaponSet, WeaponSet, WEAPON_SETS } from './weapons/Arsenal';
 import { Armory } from './powers/Armory';
@@ -43,6 +47,23 @@ export interface SongPlan {
   drops: number[];
   /** Song loudness (0–1) at a beat — can look ahead */
   intensity: (beat: number) => number;
+  // ---- structure (V2 analysis; absent when the song could not be analysed)
+  /** Sections in beats, in order, tiling the music */
+  sections?: PlanSection[];
+  /** Rising stretches that lead into drops or louder sections */
+  builds?: { start: number; end: number }[];
+  /** Beat of the song's last major peak */
+  finalPeak?: number | null;
+  /** Beat index of the first downbeat (0–3) */
+  downbeatOffset?: number;
+}
+
+export interface PlanSection {
+  start: number;
+  end: number;
+  type: SectionType;
+  /** 0 … 1 */
+  energy: number;
 }
 
 export type Outcome = 'hit' | 'block' | 'parry' | 'dodge';
@@ -121,6 +142,13 @@ export class Actor {
   readonly frames = new Float32Array(SEG_COUNT * FRAME_STRIDE);
   /** Physical layer: `pose` is the intent, `motion.body` the sprung pose that gets solved */
   readonly motion: MotionBody;
+  /** Contact / grip corrections applied after the solve (feet planted, off hand on the haft) */
+  readonly constraints = new BodyConstraints();
+  /**
+   * World direction of whatever the right hand holds, from the grip towards the tip: the
+   * forearm turned by the wrist (BladePath.ts). Renderers, trails, grips and contacts use it.
+   */
+  readonly blade = new Float32Array([1, 0, 0]);
   /** Body type: bone lengths for the skeleton, girth etc. for the particle skin */
   proportions: Readonly<Proportions> = DEFAULT_PROPORTIONS;
   dims: Readonly<Dims> = DEFAULT_DIMS;
@@ -162,8 +190,15 @@ export class Actor {
   /** Beat window of a weapon swing (for slash trails) */
   swingFrom = -1;
   swingTo = -1;
+  /**
+   * Beat the last blow planned for this actor is over — for a weapon swing, the end of its
+   * follow-through. The next blow starts no earlier, so swings are never cut off mid-arc.
+   */
+  swingFree = -1e9;
   /** Horizontal speed, m/s */
   speed = 0;
+  /** Musical grid the keys of this actor's moves land on (beats; 0 = as written) */
+  moveGrid = 0;
   /** How strongly the rhythm bounce shows (calm while walking / posing) */
   bounce = 1;
   /** Footwork phase (radians) */
@@ -183,6 +218,7 @@ export class Actor {
   snapPose(): void {
     this.motion.snap(this.pose);
     this.vx = this.vz = this.facingVel = this.airVel = 0;
+    this.constraints.reset();
   }
 
   /** Second-order follow of the stage position, facing and height (called by the engine) */
@@ -242,8 +278,14 @@ export class Actor {
   }
 
   play(def: MoveDef, start: number, unit: number, aim = 0): void {
-    this.move = new MoveInstance(def, this.base, this.pose, start, unit);
+    this.move = new MoveInstance(def, this.base, this.pose, start, unit, { blade: this.motion.blade, load: this.motion.load, grid: this.moveGrid });
     this.move.aim = aim;
+  }
+
+  /** Point `along` metres out along the held weapon from the right hand */
+  bladePoint(along: number): Vector3Tuple {
+    const h = J.rHand * 3, b = this.blade;
+    return [this.joints[h]! + b[0]! * along, this.joints[h + 1]! + b[1]! * along, this.joints[h + 2]! + b[2]! * along];
   }
 
   setProportions(p: Readonly<Proportions>): void {
@@ -314,6 +356,20 @@ export class Fighter extends Actor {
 
   get vocab(): Vocabulary {
     return vocabulary(this.weaponSet);
+  }
+
+  /**
+   * Strikes of a kind in what the fighter is holding: the style's own moves bare-handed or
+   * with its signature weapon, the held weapon's vocabulary otherwise (a spear style with a
+   * great axe swings the axe, it does not thrust with it).
+   */
+  pool(kind: 'light' | 'heavy' | 'launchers' | 'counters'): MoveName[] {
+    if (this.weaponOn && !this.signature && SWING_LAYER.enabled) {
+      const v = this.vocab;
+      const list = kind === 'counters' ? v.light : v[kind];
+      if (list.length) return list;
+    }
+    return this.arch[kind];
   }
 
   element(move?: MoveDef): Element {
@@ -406,10 +462,68 @@ const FINISHERS: MoveName[] = ['spinKick', 'backKick', 'chargedPunch', 'lungePun
 const GRAPPLES: MoveName[] = ['shove', 'trip', 'tackle', 'shoulderCharge', 'grab'];
 /** Moves that never make contact (feints) */
 const NO_CONTACT = new Set<MoveName>(['feint']);
+
+/**
+ * Musical timing of the choreography (off for A/B measurements: V1 timing). Keys of every
+ * move land on the grid, defences land with the blows, blows follow the bar's rhythm and
+ * phrases start on bar lines.
+ */
+export const RHYTHM = { enabled: true };
+
+/**
+ * Where blows fall in a bar of trading them (beats from the bar line), by the smallest gap
+ * the fighters can manage (the grid step). Every pattern hits the downbeat or beat three,
+ * leaves rests, and the busy ones syncopate — music, not a metronome.
+ */
+const BAR_RHYTHMS: Record<string, number[][]> = {
+  '2': [[0, 2], [0, 2], [0, 3], [1, 2]],
+  '1': [[0, 1, 2, 3], [0, 1, 2], [0, 2, 3], [0, 1, 3], [0, 1.5, 2, 3], [0, 2, 2.5, 3], [1, 2, 3]],
+  '0.5': [[0, 1, 1.5, 2, 3], [0, 0.5, 1, 2, 3], [0, 1, 2, 2.5, 3, 3.5], [0, 0.5, 1, 2, 2.5, 3], [0, 1, 1.5, 2, 3, 3.5], [0, 1, 1.5, 2.5, 3]],
+};
+
+/** A strike's impact pose on a stance (where a flurry's next cut should pick up from) */
+function impactPose(def: MoveDef, base: Float32Array): Float32Array {
+  const k = def.keys.find((x) => Math.abs(x.t - 1) < 1e-6) ?? def.keys[def.keys.length - 1]!;
+  return makePose(base, k.p);
+}
 /** Moves whose hit is delivered by a missile or a floating weapon */
 const RANGED_MOVES = new Set<MoveName>(['w_quickShot', 'w_drawLoose', 'w_aimFire', 'w_flickThrow', 'w_command', 'w_commandSweep']);
 const UP: Vector3Tuple = [0, 1, 0];
 const RECOVERIES: MoveName[] = ['getUp', 'kipUp', 'rollUp'];
+
+/**
+ * How the song's structure colours the choice of the next phrase (multipliers on the
+ * heat / flavour weights). A build circles, feints and powers up; a drop and the final
+ * peak go all in; a breakdown slows down into standoffs, locks and defence.
+ */
+const SECTION_BIAS: Partial<Record<SectionType | 'finalPeak', Partial<Record<PhraseKind, number>>>> = {
+  verse: { super: 0.7, summon: 0.6, beam_clash: 0.5, clone_jutsu: 0.7 },
+  build: {
+    tension: 3.5, power_up: 2.5, blade_lock: 1.4, exchange: 0.9, standoff: 0, rush: 0.5, speed_blitz: 0.7,
+    super: 0.4, summon: 0.3, beam_clash: 0.3, clone_jutsu: 0.4, dash_clash: 0.6,
+  },
+  drop: { rush: 1.6, dash_clash: 1.6, super: 1.5, speed_blitz: 1.4, air_combo: 1.4, mirror_clash: 1.2, tension: 0.2, standoff: 0 },
+  chorus: { rush: 1.3, super: 1.2, mirror_clash: 1.2, air_combo: 1.2, tension: 0.5, standoff: 0.3 },
+  bridge: { standoff: 2, tension: 1.6, grapple: 1.3, blade_lock: 1.4, ki_barrage: 1.2, rush: 0.6, speed_blitz: 0.6 },
+  breakdown: {
+    standoff: 4, tension: 3, blade_lock: 1.6, grapple: 1.3, weapon_duel: 0.9, exchange: 0.6, power_up: 1.5,
+    rush: 0.2, speed_blitz: 0.2, dash_clash: 0.3, air_combo: 0.3, super: 0.3, summon: 0.2, beam_clash: 0.2, clone_jutsu: 0.3,
+  },
+  finalPeak: { super: 2, rush: 1.5, dash_clash: 1.5, beam_clash: 1.8, mirror_clash: 1.3, tension: 0.2, standoff: 0 },
+};
+/**
+ * Weight a section adds outright, because a multiplier on a rare phrase changes little.
+ * Only phrases any fighter can always play (no meter, pet or weapon needed).
+ */
+const SECTION_ADD: Partial<Record<SectionType | 'finalPeak', Partial<Record<PhraseKind, number>>>> = {
+  build: { tension: 1.8, blade_lock: 0.4 },
+  breakdown: { standoff: 1.6, tension: 1.2, blade_lock: 0.5, grapple: 0.3 },
+  bridge: { standoff: 0.6, tension: 0.6 },
+  drop: { rush: 0.8, dash_clash: 0.6 },
+  finalPeak: { rush: 0.6, dash_clash: 0.6 },
+};
+/** Sections where an ultramove may start outside a planned drop (it is an event, not an attack) */
+const ULTRA_SECTIONS = new Set<SectionType>(['drop', 'chorus']);
 
 // ============================================================================ engine
 
@@ -546,6 +660,33 @@ export class CombatEngine {
     // (the finale's ultra is extra — it ends the show)
     const beats = Math.min(plan.totalBeats, 2000);
     this.ultraMax = clamp(1 + Math.floor(beats / 190), 1, 4);
+  }
+
+  /** The song section at a beat (null without an analysis) */
+  sectionAt(beat: number): PlanSection | null {
+    const secs = this.plan.sections;
+    if (!secs) return null;
+    for (const sec of secs) if (beat >= sec.start && beat < sec.end) return sec;
+    return null;
+  }
+
+  /** In the song's last full-energy section, from its start */
+  atFinalPeak(beat: number): boolean {
+    const fp = this.plan.finalPeak;
+    if (fp === null || fp === undefined) return false;
+    const sec = this.sectionAt(fp);
+    return sec ? beat >= sec.start && beat < sec.end : Math.abs(beat - fp) < 8;
+  }
+
+  inBuild(beat: number): boolean {
+    return !!this.plan.builds?.some((b) => beat >= b.start && beat < b.end);
+  }
+
+  /** Beat `b` is a downbeat (true when the bar grid is unknown) */
+  onDownbeat(b: number): boolean {
+    const off = this.plan.downbeatOffset;
+    if (off === undefined) return true;
+    return (((Math.round(b) - off) % 4) + 4) % 4 === 0;
   }
 
   /**
@@ -714,9 +855,15 @@ export class CombatEngine {
     this.beat += (simDt * music.bpm) / 60;
     this.heat = this.heatAt(this.beat);
 
-    while (this.timeline.length && this.timeline[0]!.at <= this.beat) this.timeline.shift()!.fn();
+    // Everything due before the phrase boundary happens before the next phrase is planned,
+    // the rest after it, whatever the frame rate (planning and callbacks share the RNG)
+    const due = (b: number) => {
+      while (this.timeline.length && this.timeline[0]!.at <= b) this.timeline.shift()!.fn();
+    };
+    due(Math.min(this.beat, this.phraseEnd));
     if (!this.outroDone && this.beat >= this.plan.outroStart && this.beat >= this.phraseEnd - 0.01) this.outro(Math.ceil(this.beat));
     if (this.beat >= this.phraseEnd) this.nextPhrase();
+    due(this.beat);
 
     this.updateStage(simDt);
     const [a, b] = this.fighters;
@@ -765,16 +912,110 @@ export class CombatEngine {
     const rampLen = clamp(p.totalBeats * 0.32, 32, 120);
     const ramp = clamp((beat - p.introEnd) / rampLen);
     const cap = 0.14 + 0.86 * Math.pow(ramp, 1.3);
-    const onDrop = p.drops.some((d) => beat >= d && beat < d + 16) ? 0.15 : 0;
-    // Once the fight is on it never idles: a high floor, and the flavour's own edge
+    const onDrop = (p.drops.some((d) => beat >= d && beat < d + 16) ? 0.15 : 0) + (this.atFinalPeak(beat) ? 0.1 : 0);
+    // Once the fight is on it never idles: a high floor, and the flavour's own edge. A
+    // breakdown is allowed to cool down (slower exchanges, standoffs)
     const on = beat > p.introEnd;
-    const floor = on ? 0.48 : 0.06;
+    const floor = on ? (this.sectionAt(beat)?.type === 'breakdown' ? 0.3 : 0.48) : 0.06;
     return clamp(Math.min(I * 1.05 + onDrop, cap + onDrop) + 0.16 + (on ? this.flavor.heat : 0), floor, 1);
   }
 
   /** Creative parameters of the current frame (0 … 1) */
   get params(): Readonly<NormalizedParams> {
     return this.prm;
+  }
+
+  // ------------------------------------------------------------------ meter
+  /** Beat of the song's bar lines: the analysis' downbeat, else bars counted from beat 0 */
+  private get barOrigin(): number {
+    return this.plan.downbeatOffset ?? 0;
+  }
+
+  /** Position within the bar (0 = downbeat … < 4) */
+  barPos(b: number): number {
+    return (((b - this.barOrigin) % 4) + 4) % 4;
+  }
+
+  /** First bar line at or after b */
+  nextBar(b: number): number {
+    const o = this.barOrigin;
+    return o + Math.ceil((b - o - 1e-6) / 4) * 4;
+  }
+
+  /**
+   * Metrical weight of a beat position: 4 the downbeat, 3 the half bar, 2 the other beats,
+   * 1 the off-beat eighths, 0 anything finer. The heaviest moments of a phrase go on the
+   * heaviest positions — that is what makes the music feel in charge.
+   */
+  metricWeight(b: number): number {
+    const p = this.barPos(b);
+    const near = (x: number) => Math.abs(p - x) < 1e-3 || Math.abs(p - x - 4) < 1e-3;
+    if (near(0)) return 4;
+    if (near(2)) return 3;
+    if (near(1) || near(3)) return 2;
+    if (Math.abs(p * 2 - Math.round(p * 2)) < 2e-3) return 1;
+    return 0;
+  }
+
+  /**
+   * The grid move keys land on: sixteenth notes, or eighths once sixteenths get shorter
+   * than 0.1 s (fast songs). Off when rhythm quantisation is disabled.
+   */
+  keyGrid(): number {
+    if (!RHYTHM.enabled) return 0;
+    return 0.25 * this.spb >= 0.1 ? 0.25 : 0.5;
+  }
+
+  /**
+   * Beats blows may land on through a phrase, bar by bar from the song's bar lines: one
+   * rhythm pattern per bar for the grid step (BAR_RHYTHMS), within [from, to].
+   */
+  private rhythmSlots(from: number, to: number, step: number): number[] {
+    const key = step >= 2 ? '2' : step >= 1 ? '1' : '0.5';
+    const out: number[] = [];
+    for (let bar = this.nextBar(from) - 4; bar <= to; bar += 4) {
+      for (const x of this.rng.choice(BAR_RHYTHMS[key]!)) {
+        const b = bar + x;
+        if (b >= from - 1e-6 && b <= to + 1e-6) out.push(b);
+      }
+    }
+    return out.sort((a, b) => a - b);
+  }
+
+  /**
+   * The slot a blow lands on: the first at or after `lower`; a heavy one (a finisher, a
+   * critical) waits up to `reach` beats for the heaviest position of the bar in that window.
+   */
+  private pickSlot(slots: number[], lower: number, reach = 0): number | undefined {
+    const i = slots.findIndex((b) => b >= lower - 1e-6);
+    if (i < 0) return undefined;
+    let best = slots[i]!;
+    if (reach > 0) {
+      for (let k = i + 1; k < slots.length && slots[k]! <= lower + reach + 1e-6; k++) {
+        if (this.metricWeight(slots[k]!) > this.metricWeight(best)) best = slots[k]!;
+      }
+    }
+    return best;
+  }
+
+  /** First beat at or after b on a strong position (the downbeat or beat three) */
+  strongAfter(b: number): number {
+    let x = Math.ceil(b - 1e-6);
+    while (this.metricWeight(x) < 3) x++;
+    return x;
+  }
+
+  /** How strongly the bodies carry the beat: the fight's heat, softer through a breakdown */
+  grooveAt(b: number): number {
+    if (!this.running || b < this.plan.introEnd - 8) return 0.15;
+    const sec = this.sectionAt(b)?.type;
+    return clamp(0.3 + 0.7 * this.heat) * (sec === 'breakdown' ? 0.6 : sec === 'intro' || sec === 'outro' ? 0.75 : 1);
+  }
+
+  /** Quiet stretches groove on every other beat */
+  halfTime(b: number): boolean {
+    const sec = this.sectionAt(b)?.type;
+    return this.heat < 0.35 || sec === 'breakdown';
   }
 
   /** Seconds per beat */
@@ -822,6 +1063,7 @@ export class CombatEngine {
   }
 
   private updateActor(a: Actor, foe: Actor, dt: number): void {
+    a.moveGrid = this.keyGrid();
     // Clones slide off their marks when hit; fighters are moved by the stage
     a.ox += a.kx * dt;
     a.oz += a.kz * dt;
@@ -872,32 +1114,77 @@ export class CombatEngine {
       legsBusy ||= u < 1.7 && (d.limb === J.lFoot || d.limb === J.rFoot || d.limb === J.lKn || d.limb === J.rKn || !!d.air || d === MOVES.walk || d === MOVES.dash);
     } else a.pose.set(a.base);
 
-    // Rhythm: a knee bounce on the beat that grows with the heat; chaos jitter
-    // (breathing, weight shifts and stepping live in the motion layer)
-    a.bounce = damp(a.bounce, a.stanceKey === 'relaxed' ? 0.25 : 1, 1.5, dt);
-    const beatFrac = this.beat - Math.floor(this.beat);
-    const bounce = Math.pow(1 - beatFrac, 3) * (0.03 + 0.12 * this.heat) * a.bounce;
-    a.pose[P.lKn] += bounce;
-    a.pose[P.rKn] += bounce * 0.9;
-    a.pose[P.lHipP] += bounce * 0.4;
-    a.pose[P.rHipP] += bounce * 0.35;
+    // Rhythm lives in the motion layer (the groove: a bounce landing on every beat, weight
+    // rocking over the bar); here only how strongly this actor carries it. Chaos jitter.
+    a.bounce = damp(a.bounce, a.stanceKey === 'relaxed' ? 0.4 : 1, 1.5, dt);
+    if (!GROOVE.enabled) {
+      // V1: a knee bounce that jumps on the beat (for A/B measurements)
+      const beatFrac = this.beat - Math.floor(this.beat);
+      const bounce = Math.pow(1 - beatFrac, 3) * (0.03 + 0.12 * this.heat) * a.bounce;
+      a.pose[P.lKn] += bounce;
+      a.pose[P.rKn] += bounce * 0.9;
+      a.pose[P.lHipP] += bounce * 0.4;
+      a.pose[P.rHipP] += bounce * 0.35;
+    }
     const ch = this.prm.chaos * 0.05 * this.heat;
     if (ch > 0) {
       a.pose[P.lShP] += wobble(this.time * 3, a.team + 1) * ch;
       a.pose[P.rShP] += wobble(this.time * 3, a.team + 5) * ch;
     }
 
+    // The head keeps the opponent's head in view (launched, down on the floor, towering):
+    // pitch only — facing already turns the body. Set on the target, so the loose head
+    // spring gives it a natural lag
+    const dh = Math.hypot(look.x - a.x, look.z - a.z);
+    if (dh > 0.3) a.pose[P.head] += clamp(-Math.atan2(look.joints[J.head * 3 + 1]! - a.joints[J.head * 3 + 1]!, Math.max(0.6, dh)), -0.45, 0.45) * 0.6;
+
     const c = Math.cos(a.facing), sn = Math.sin(a.facing);
     a.motion.step({
       dt, time: this.time, beat: this.beat, pose: a.pose, base: a.base, move: a.move,
       vlx: vx * c + vz * sn, vlz: -vx * sn + vz * c, speed: a.speed, facingVel: a.facingVel,
       legsFree: !legsBusy, relaxed: a.stanceKey === 'relaxed', landing: a.landing, heat: this.heat,
+      bpm, bar: this.barPos(this.beat), groove: this.grooveAt(this.beat) * a.bounce, halfTime: this.halfTime(this.beat) || a.stanceKey === 'relaxed',
     });
     a.gait = a.motion.gait;
 
     solvePose(a.motion.body, a.joints, a.x, a.z, a.facing + aim, a.air, a.frames, a.dims);
+    // The blade: the forearm segment's frame turned by the wrist
+    {
+      const f = SEG.rFore * FRAME_STRIDE + 3, m = a.frames, w = a.motion.wrist, b = a.blade;
+      b[0] = m[f]! * w[0]! + m[f + 1]! * w[1]! + m[f + 2]! * w[2]!;
+      b[1] = m[f + 3]! * w[0]! + m[f + 4]! * w[1]! + m[f + 5]! * w[2]!;
+      b[2] = m[f + 6]! * w[0]! + m[f + 7]! * w[1]! + m[f + 8]! * w[2]!;
+    }
+    // Correction layer: planted feet stay planted, the off hand holds a two-handed weapon
+    if (teleported) a.constraints.reset();
+    const limb = a.move?.def.limb;
+    const kicking = !!a.move && a.move.progress(this.beat) < 1.7;
+    a.constraints.apply({
+      dt, pose: a.motion.body, wx: a.x, wz: a.z, facing: a.facing + aim, air: a.air, vx, vz, speed: a.speed, dims: a.dims,
+      legBusy: [kicking && (limb === J.lFoot || limb === J.lKn), kicking && (limb === J.rFoot || limb === J.rKn)],
+      noContact: onPath || !!a.move?.def.air,
+      grip: a instanceof Fighter ? this.gripFor(a) : null,
+      blade: a.blade,
+      beat: this.beat,
+      spb: 60 / bpm,
+    }, a.joints, a.frames);
     a.hitFlash = Math.max(0, a.hitFlash - dt * 3);
     a.dashing = Math.max(0, a.dashing - dt);
+  }
+
+  /** Where the off hand holds this fighter's weapon (metres along it), or null when it should not */
+  private gripFor(f: Fighter): number | null {
+    if (!f.weaponOn || f.loose || f.dead || f.hidden) return null;
+    const off = TWO_HAND_GRIP[f.weapon];
+    if (off === undefined) return null;
+    const m = f.move;
+    if (m && m.progress(this.beat) < 1.6) {
+      const l = m.def.limb;
+      // The move needs the off hand, or is a hand-to-hand blow (the weapon rides in one hand)
+      if (l === J.lHand || l === J.lEl) return null;
+      if (!m.def.weapon && (l === J.rHand || l === J.rEl)) return null;
+    }
+    return off;
   }
 
   // ------------------------------------------------------------------ scheduling helpers (also used by Techniques)
@@ -946,25 +1233,43 @@ export class CombatEngine {
   /** Where a strike lands: the limb, or the weapon's working part if one is held */
   limbPos(a: Actor, limb: number, weapon: boolean): Vector3Tuple {
     const p = a.joint(limb);
-    if (weapon && a instanceof Fighter && a.weaponOn) {
-      const e = a.joint(J.rEl);
-      const h = a.joint(J.rHand);
-      const dx = h[0] - e[0], dy = h[1] - e[1], dz = h[2] - e[2];
-      const l = Math.hypot(dx, dy, dz) || 1;
-      const len = WEAPON_LENGTH[a.weapon] * 0.68;
-      return [h[0] + (dx / l) * len, h[1] + (dy / l) * len, h[2] + (dz / l) * len];
-    }
+    if (weapon && a instanceof Fighter && a.weaponOn) return a.bladePoint(WEAPON_LENGTH[a.weapon] * 0.68);
     return p;
+  }
+
+  /** Which part of the body a blow landing at `pos` hits: the region of the nearest joint */
+  hitRegion(D: Actor, pos: Vector3Tuple): HitRegion {
+    const cands: [number, HitRegion][] = [
+      [J.head, 'head'], [J.neck, 'head'], [J.chest, 'torso'], [J.lSh, 'shoulderL'], [J.rSh, 'shoulderR'], [J.pelvis, 'hips'],
+      [J.lHip, 'hips'], [J.rHip, 'hips'], [J.lKn, 'legL'], [J.lFoot, 'legL'], [J.rKn, 'legR'], [J.rFoot, 'legR'],
+    ];
+    let best: HitRegion = 'torso', bd = Infinity;
+    for (const [j, r] of cands) {
+      const d = (D.joints[j * 3]! - pos[0]) ** 2 + (D.joints[j * 3 + 1]! - pos[1]) ** 2 + (D.joints[j * 3 + 2]! - pos[2]) ** 2;
+      if (d < bd) {
+        bd = d;
+        best = r;
+      }
+    }
+    return best;
+  }
+
+  /** How much harder a blow lands because the two bodies were closing on each other (1 … 1.5) */
+  private closingBoost(A: Actor, D: Actor, dir: Vector3Tuple): number {
+    const closing = (A.vx - D.vx) * dir[0] + (A.vz - D.vz) * dir[2];
+    return 1 + clamp(closing / 8, 0, 0.5);
   }
 
   /**
    * Knockback. Light hits drive the pair across the arena together (the
    * attacker keeps the pressure on); heavy ones throw the target away.
    */
-  knock(a: Actor, dir: Vector3Tuple, strength: number): void {
-    // The body takes the blow before the stage moves it: head snap, torso fold, off-balance
+  knock(a: Actor, dir: Vector3Tuple, strength: number, region: HitRegion = 'torso', bodyScale = 1): void {
+    // The body takes the blow before the stage moves it: head snap, torso fold, off-balance.
+    // (`bodyScale` only shapes that visible reaction; the stage, which the choreography
+    // reads, gets the scheduled strength so the fight stays frame-rate independent)
     const fc = Math.cos(a.facing), fs = Math.sin(a.facing);
-    a.motion.push(dir[0] * fc + dir[2] * fs, -dir[0] * fs + dir[2] * fc, strength);
+    a.motion.push(dir[0] * fc + dir[2] * fs, -dir[0] * fs + dir[2] * fc, strength * bodyScale, region);
     if (!(a instanceof Fighter)) {
       a.kx += dir[0] * strength;
       a.kz += dir[2] * strength;
@@ -1121,8 +1426,56 @@ export class CombatEngine {
    * unit earlier and steps in to the move's reach; the defender reacts just in
    * time (block / parry / dodge) or on impact (hit).
    */
+  /** Weight in a fighter's hands (as the motion layer is loaded with it) */
+  heft(f: Actor): number {
+    if (!(f instanceof Fighter) || !f.weaponOn) return 0;
+    return f.weapon === f.weaponSet.form ? f.weaponSet.mass : 1.2;
+  }
+
+  /**
+   * Shortest unit (beats) a weapon swing can be played at: its wind-up → impact must last
+   * long enough to read as a committed cut (longer for a heavier or slower weapon). 0 for
+   * anything that is not a weapon swing.
+   */
+  swingMin(att: Actor, def: MoveDef): number {
+    if (!(att instanceof Fighter) || !att.weaponOn || !isSwing(def)) return 0;
+    const heft = Math.min(1, this.heft(att) / 2.2);
+    const secs = (0.13 + 0.13 * heft) / Math.max(0.6, att.weaponSet.speed);
+    return secs / (1 - windOf(def)) / this.spb;
+  }
+
+  /**
+   * When a swing can land: the earliest impact at or after `t` (on a `grid`-beat grid)
+   * that leaves it its full wind-up after the attacker's previous blow — the previous
+   * swing's follow-through included — and the unit to play it with.
+   */
+  swingSlot(att: Actor, name: MoveName, t: number, unit: number, grid = 0.5): { t: number; unit: number } {
+    const min = this.swingMin(att, MOVES[name]);
+    if (!min) return { t, unit };
+    const earliest = att.swingFree + min;
+    if (t < earliest - 1e-6) t = Math.ceil((earliest - 1e-6) / grid) * grid;
+    return { t, unit: Math.max(unit, min) };
+  }
+
+  /**
+   * An armed fighter's blow waits for its previous swing to finish following through: the
+   * impact stays on its beat, the wind-up starts from the end of the last arc. Returns the
+   * unit to play the move with and books the blow (its follow-through included).
+   */
+  claimSwing(att: Actor, move: MoveDef, t: number, unit: number): number {
+    if (!(att instanceof Fighter) || !att.weaponOn || !SWING_LAYER.enabled) return unit;
+    unit = Math.max(unit, this.swingMin(att, move));
+    const start = Math.max(t - unit, att.swingFree);
+    unit = Math.max(0.05, t - start);
+    att.swingFree = isSwing(move) ? t + swingFollow(move, this.heft(att)) * unit : t;
+    return unit;
+  }
+
   strike(att: Actor, def: Fighter, name: MoveName, t: number, unit: number, outcome: Outcome, opts: StrikeOpts = {}): void {
     const move: MoveDef = MOVES[name];
+    unit = this.claimSwing(att, move, t, unit);
+    // The defender is busy with this blow (guarding it, or taking it) until it has landed
+    def.swingFree = Math.max(def.swingFree, t + (outcome === 'hit' ? 0.5 : 0));
     // Bows, thrown blades, floating weapons: the missile delivers the hit
     if (RANGED_MOVES.has(name) && att instanceof Fighter) {
       this.rangedAttack(att, def, name, t, unit, outcome, opts);
@@ -1157,19 +1510,24 @@ export class CombatEngine {
       }
       if (move.weapon) {
         att.swingFrom = t - unit * 0.45;
-        att.swingTo = t + unit * 0.15;
+        att.swingTo = t + unit * (isSwing(move) ? swingFollow(move, this.heft(att)) : 0.15);
       }
     });
     if (outcome === 'block' || outcome === 'parry') {
-      this.play(def, this.defenseMove(def, outcome, move.zone), t - unit * 0.6, unit);
+      // The guard (or the deflection) arrives with the blow: one accent for both bodies
+      const dm = this.defenseMove(def, outcome, move.zone);
+      this.play(def, dm, t - unit * (RHYTHM.enabled ? accentOf(MOVES[dm]) : 0.6), unit);
     } else if (outcome === 'dodge') {
       // Now and then a razor-thin, last-moment evasion (the director gives it bullet time)
       const perfect = unit <= 1.2 && this.rng.boolean(0.06 + 0.12 * this.heat);
-      const dm = perfect ? 'perfectDodge' : this.dodgeMove(def);
+      const du = perfect ? unit * 0.7 : unit;
       const at = t - unit * (perfect ? 0.3 : 0.55);
       this.at(at, () => {
         if (def.dead) return;
-        def.play(MOVES[dm], at, perfect ? unit * 0.7 : unit);
+        const dm = perfect ? 'perfectDodge' : this.dodgeMove(def);
+        // The body is out of the way exactly as the blow passes
+        const from = RHYTHM.enabled ? Math.max(at, t - du * accentOf(MOVES[dm])) : at;
+        def.play(MOVES[dm], from, du);
         def.dashing = 0.35;
         if (perfect) this.emit('perfect_dodge', def.joint(J.chest), this.dirBetween(att, def), 1, def.team, att.team);
       });
@@ -1187,7 +1545,7 @@ export class CombatEngine {
    * of the attacker does the rest (wind-up depth, lag, recoil, recovery).
    */
   attack(att: Fighter, def: Fighter, o: { type: 'punch' | 'kick' | 'slash' | 'any'; intensity: number }, t: number, unit = 1, outcome: Outcome = 'hit'): MoveName {
-    const pool = o.intensity > 0.6 ? att.arch.heavy : att.arch.light;
+    const pool = att.pool(o.intensity > 0.6 ? 'heavy' : 'light');
     const match = pool.filter((n) => {
       const l = MOVES[n].limb;
       const foot = l === J.lFoot || l === J.rFoot || l === J.lKn || l === J.rKn;
@@ -1215,7 +1573,7 @@ export class CombatEngine {
     if (outcome === 'hit') {
       if (light) {
         def.play(MOVES[zone === 'high' ? 'hitHead' : zone === 'low' ? 'hitLow' : 'hitBody'], t, 0.5);
-        this.knock(def, dir, 1.2);
+        this.knock(def, dir, 1.2, this.hitRegion(def, pos), this.closingBoost(att, def, dir));
         att.motion.recoil(0.4, 'hit');
         def.hitFlash = 0.7;
         this.damage(def, 1.5, att.team, t);
@@ -1225,7 +1583,7 @@ export class CombatEngine {
       const crit = !!opts.critical;
       if (opts.onImpact) opts.onImpact();
       this.react(def, opts.react ?? this.reactFor(move, crit, zone), t, opts.onImpact ? 0 : 1);
-      this.knock(def, dir, (crit ? 9 : 2.6) * (move.power ?? 1) * (opts.knock ?? 1));
+      this.knock(def, dir, (crit ? 9 : 2.6) * (move.power ?? 1) * (opts.knock ?? 1), this.hitRegion(def, pos), this.closingBoost(att, def, dir));
       def.hitFlash = 1;
       A.meter = Math.min(1, A.meter + (crit ? 0.2 : 0.1));
       def.meter = Math.min(1, def.meter + 0.06);
@@ -1261,7 +1619,9 @@ export class CombatEngine {
   /** How this fighter gets out of the way: their own evasions, mixed with the shared ones */
   private dodgeMove(def: Fighter): MoveName {
     const own = def.weaponOn && !def.signature ? def.vocab.defense.dodges : def.arch.dodges;
-    return this.rng.boolean(0.35) ? this.rng.choice(GENERIC_DODGES) : this.rng.choice(own);
+    // Within the pool, the evasions that flow out of this fighter's stance are preferred
+    const pool = this.rng.boolean(0.35) ? GENERIC_DODGES : own;
+    return pickByPose(pool, MOVES, def.base, def.base, this.rng);
   }
 
   /**
@@ -1338,7 +1698,8 @@ export class CombatEngine {
     const recover = (when: number) =>
       this.at(when, () => {
         if (D.reactToken !== tok || (D instanceof Fighter && D.dead)) return;
-        D.play(MOVES[this.rng.choice(RECOVERIES)], when, 1);
+        // The get-up that starts closest to how the body lies
+        D.play(MOVES[pickByPose(RECOVERIES, MOVES, exitPose(MOVES.down, D.base), D.base, this.rng)], when, 1);
       });
     switch (kind) {
       case 'launched':
@@ -1387,7 +1748,7 @@ export class CombatEngine {
       const el = o.element ?? A.element();
       if (out === 'hit') {
         this.react(D, o.react ?? (o.big ? 'hitBig' : 'hitBody'), t);
-        this.knock(D, dir, o.knock ?? 8);
+        this.knock(D, dir, o.knock ?? 8, this.hitRegion(D, pos));
         D.hitFlash = 1;
         A.meter = Math.min(1, A.meter + 0.03);
         this.emit('tech_hit', pos, dir, o.big ? 1 : 0.5, A.team, D.team, { sub: el, critical: !!o.big });
@@ -1688,6 +2049,9 @@ export class CombatEngine {
   // ------------------------------------------------------------------ phrases
   private nextPhrase(): void {
     const start = this.beat - this.phraseEnd < 0.5 ? this.phraseEnd : Math.ceil(this.beat);
+    // Plan from the phrase's own beat, not the frame's (the same fight at any frame rate)
+    this.heat = this.heatAt(start);
+    this.planBeat = start;
     const [f0, f1] = this.fighters;
     if (f0.dead || f1.dead) {
       this.phraseEnd = start + 1;
@@ -1761,6 +2125,14 @@ export class CombatEngine {
       case 'rush': len = this.phraseRush(start, A, D); break;
       default: break;
     }
+    // Phrases change on the pickup beat before a bar line (or before the half bar, if that
+    // line is more than two beats off): the next action winds up on the "and" and its first
+    // blow lands on the ONE, where the music's own phrases start. A set piece aimed at a drop
+    // keeps its own timing.
+    if (RHYTHM.enabled && !this.pending) {
+      const end = start + len, line = this.nextBar(end + 1) - 1;
+      len = Math.max(1, (line - end <= 2 + 1e-6 ? line : line - 2) - start);
+    }
     this.phrase = kind;
     this.phraseStart = start;
     this.phraseEnd = start + len;
@@ -1779,19 +2151,20 @@ export class CombatEngine {
     this.dropsHandled.add(drop);
     const who = this.attacker;
     const A = this.fighters[who]!;
-    const late = drop > this.plan.totalBeats * 0.3 || this.plan.drops.indexOf(drop) >= 1;
-    const options: { kind: PhraseKind; lead: number; tech?: TechId }[] = [];
+    const late = drop > this.plan.totalBeats * 0.3 || this.plan.drops.indexOf(drop) >= 1 || this.atFinalPeak(drop);
     const ult = this.pickUltra(A);
-    if (late && this.ultraAvailable(A, drop - TECHNIQUES[ult].lead) && drop < this.plan.outroStart - 4) {
+    const fits = (lead: number) => drop - lead >= start;
+    let pick: { kind: PhraseKind; lead: number; tech?: TechId };
+    if (late && fits(TECHNIQUES[ult].lead) && this.ultraAvailable(A, drop - TECHNIQUES[ult].lead) && drop < this.plan.outroStart - 4) {
       // The drop is where an ultramove's impact belongs: its build-up rides the music's
-      options.push({ kind: 'ultra', lead: TECHNIQUES[ult].lead, tech: ult });
+      pick = { kind: 'ultra', lead: TECHNIQUES[ult].lead, tech: ult };
     } else {
+      // No room (or budget) for an ultra: a set piece still lands on the drop
       const t = this.pickTech(A);
-      options.push({ kind: 'super', lead: TECHNIQUES[t].lead, tech: t }, { kind: 'dash_clash', lead: 3 }, { kind: 'beam_clash', lead: 2 }, { kind: 'summon', lead: 6 });
+      const usable = [{ kind: 'super' as PhraseKind, lead: TECHNIQUES[t].lead, tech: t }, { kind: 'dash_clash' as PhraseKind, lead: 3 }, { kind: 'beam_clash' as PhraseKind, lead: 2 }, { kind: 'summon' as PhraseKind, lead: 6 }].filter((o) => fits(o.lead));
+      if (!usable.length) return null;
+      pick = this.rng.choice(usable);
     }
-    const usable = options.filter((o) => drop - o.lead >= start);
-    if (!usable.length) return null;
-    const pick = usable[0]!.kind === 'ultra' ? usable[0]! : this.rng.choice(usable);
     const at = drop - pick.lead;
     this.pending = { kind: pick.kind, at, fighter: who, tech: pick.tech };
     if (at <= start + 0.01) {
@@ -1802,6 +2175,8 @@ export class CombatEngine {
     return 'tension';
   }
   private pendingTech: TechId | null = null;
+  /** Beat the phrase being planned starts on */
+  private planBeat = 0;
 
   private choosePhrase(): PhraseKind {
     const h = this.heat;
@@ -1811,19 +2186,25 @@ export class CombatEngine {
     const D = this.fighters[1 - this.attacker]!;
     const underdog = Math.min(f0.health, f1.health) < 50 && Math.max(f0.superMode, f1.superMode) < 0.5;
     const hasPet = this.pets.some((p) => p.active);
-    const song = this.beat / Math.max(1, this.plan.totalBeats);
-    const dropsAhead = this.plan.drops.some((d) => d > this.beat && !this.dropsHandled.has(d) && d < this.plan.outroStart - 4);
+    const b = this.planBeat;
+    const song = b / Math.max(1, this.plan.totalBeats);
+    const dropsAhead = this.plan.drops.some((d) => d > b && !this.dropsHandled.has(d) && d < this.plan.outroStart - 4);
+    const sec = this.sectionAt(b);
+    const peak = this.atFinalPeak(b);
+    // Ultramoves need the song's permission: a loud section or the final peak, and a bar line
+    // to start on. (Without an analysis the heat and the budget decide, as before)
+    const ultraMusic = !sec || ((ULTRA_SECTIONS.has(sec.type) || peak) && this.onDownbeat(b));
     const w: [PhraseKind, number][] = [
       // Non-stop: circling and posing are rare breaths, trading blows is the default
       ['tension', 0.08 * (1 - h) + 0.02],
-      ['standoff', h < 0.3 ? 0.06 : 0],
+      ['standoff', h < 0.3 || sec?.type === 'breakdown' || sec?.type === 'bridge' ? 0.06 + (sec ? 0.1 : 0) : 0],
       ['exchange', 3.6 + f * 2],
       ['weapon_duel', h > 0.3 ? (A.arch.weapon ? 0.5 : 0.35) : 0],
       ['mirror_clash', h > 0.3 ? 0.7 : 0],
       ['blade_lock', h > 0.35 ? (A.weaponOn && D.weaponOn ? 0.8 : 0.35) : 0],
       ['grapple', h > 0.3 ? 0.6 : 0],
       ['super', h > 0.4 && A.meter >= 0.5 ? 1.8 + e : 0],
-      ['ultra', song > 0.35 && h > 0.55 && A.meter >= 0.8 && !dropsAhead && this.ultraAvailable(A, this.beat) && this.beat < this.plan.outroStart - 16 ? 2.2 : 0],
+      ['ultra', ultraMusic && song > 0.35 && h > 0.55 && A.meter >= 0.8 && !dropsAhead && this.ultraAvailable(A, b) && b < this.plan.outroStart - 16 ? 2.2 : 0],
       ['hybrid', h > 0.3 ? (A.weaponOn || A.arch.weapon ? 0.75 : 0.45) : 0],
       ['rush', h > 0.4 ? 0.8 + f * 0.6 : 0],
       ['speed_blitz', h > 0.45 ? (A.motion.profile.movementStyle === 'agile' ? 0.9 : 0.3) + e * 0.2 : 0],
@@ -1836,9 +2217,14 @@ export class CombatEngine {
       ['beam_clash', h > 0.75 && !this.recent.slice(0, 5).includes('beam_clash') ? 0.15 + e * 0.35 : 0],
       ['power_up', underdog && h > 0.45 ? 1 + e : 0],
     ];
+    const bias = sec ? SECTION_BIAS[sec.type] : undefined;
+    const peakBias = peak ? SECTION_BIAS.finalPeak : undefined;
+    const add = sec ? SECTION_ADD[sec.type] : undefined;
+    const peakAdd = peak ? SECTION_ADD.finalPeak : undefined;
     let total = 0;
     for (const item of w) {
       item[1] *= this.flavor.weights[item[0]] ?? 1;
+      item[1] = item[1] * (bias?.[item[0]] ?? 1) * (peakBias?.[item[0]] ?? 1) + (add?.[item[0]] ?? 0) + (peakAdd?.[item[0]] ?? 0);
       if (item[0] === this.recent[0]) item[1] *= item[0] === 'exchange' ? 0.5 : 0.1;
       else if (this.recent.slice(1, 4).includes(item[0]) && item[0] !== 'exchange') item[1] *= 0.4;
       total += item[1];
@@ -1880,7 +2266,8 @@ export class CombatEngine {
       const t = s + k;
       const r = this.rng.next();
       if (r < 0.3) this.play(f, this.rng.choice(f.arch.taunts), t, 0.8);
-      else if (r < 0.6) this.play(f, this.rng.choice(f.arch.light), t, 1.2); // a feint from out of range
+      // A feint from out of range: it "lands" on the next beat
+      else if (r < 0.6) this.play(f, this.rng.choice(f.pool('light')), t, RHYTHM.enabled ? 1 : 1.2);
       this.at(t, () => (f.auraBoost = Math.max(f.auraBoost, 0.3 + this.heat * 0.5)));
     }
     // Before a drop: both gather power
@@ -1946,18 +2333,28 @@ export class CombatEngine {
     let prevImpact = s;
     let combo = this.pickCombo(A);
     let ci = 0;
+    // Blows on eighth notes as soon as the fight heats up (quarters only at low heat)
+    const stepOf = (f: Fighter) => this.grid((h < 0.4 ? 0.36 : h < 0.65 ? 0.24 : 0.19) / (f.arch.tempo * (f.weaponOn && !f.signature ? f.weaponSet.speed : 1)));
+    // Where the blows may fall: the bar's rhythm, not just the next grid line
+    const slots = RHYTHM.enabled ? this.rhythmSlots(s + 0.5, s + len - 0.5, stepOf(A)) : null;
     while (t <= s + len - 0.5 + 1e-6) {
-      // Blows on eighth notes as soon as the fight heats up (quarters only at low heat)
-      const secs = (h < 0.4 ? 0.36 : h < 0.65 ? 0.24 : 0.19) / (A.arch.tempo * (A.weaponOn && !A.signature ? A.weaponSet.speed : 1));
-      const step = this.grid(secs);
+      const step = stepOf(A);
       const name = combo[ci++]!;
       const move = MOVES[name];
       const long = !!move.hits || !!move.air || move.keys.some((k) => k.p.spin !== undefined || k.p.flip !== undefined);
-      const unit = Math.max(step, long ? this.grid(0.5) : step);
+      let unit = Math.max(step, long ? this.grid(0.5) : step);
       t = Math.max(t, prevImpact + unit);
-      if (t > s + len - 0.5 + 1e-6) break;
+      // A weapon swing gets its full arc: wind-up after the last follow-through, on the grid
+      ({ t, unit } = this.swingSlot(A, name, t, unit));
       const last = ci >= combo.length;
       const crit = last && this.rng.boolean((0.2 + this.prm.epic * 0.5) * h);
+      if (slots) {
+        // The combo's last blow resolves on the heaviest beat within reach
+        const at = this.pickSlot(slots, t, last || crit ? 1.5 : 0);
+        if (at === undefined) break;
+        t = at;
+      }
+      if (t > s + len - 0.5 + 1e-6) break;
       const out: Outcome = crit ? 'hit' : this.outcome();
       this.strike(A, D, name, t, unit, out, { critical: crit });
       prevImpact = t;
@@ -1975,7 +2372,7 @@ export class CombatEngine {
         const tmp = A;
         A = D;
         D = tmp;
-        combo = [this.rng.choice(A.arch.counters), this.rng.choice(A.arch.light)];
+        combo = [this.rng.choice(A.pool('counters')), this.rng.choice(A.pool('light'))];
         ci = 0;
       } else if (last) {
         if (this.rng.boolean(0.35)) {
@@ -1986,7 +2383,7 @@ export class CombatEngine {
         combo = this.pickCombo(A);
         ci = 0;
       }
-      t += step;
+      if (!slots) t += step;
     }
     // The familiar sometimes jumps in
     const pet = this.pets[A0.team]!;
@@ -2001,10 +2398,10 @@ export class CombatEngine {
       A.airRate = 6;
       A.play(MOVES.jump, t + 0.3, 0.5);
     });
-    const light = A.arch.light;
+    const light = A.pool('light');
     this.strike(A, D, this.rng.choice(light), t + 1, 0.5, 'hit', { damage: 3, knock: 0.2, react: 'launched' });
     this.strike(A, D, this.rng.choice(light), t + 1.5, 0.5, 'hit', { damage: 3, knock: 0.2, react: 'launched' });
-    this.strike(A, D, this.rng.choice(A.arch.heavy), t + 2.5, 1, 'hit', { critical: true, damage: 10, knock: 0.4, react: 'down' });
+    this.strike(A, D, this.rng.choice(A.pool('heavy')), t + 2.5, 1, 'hit', { critical: true, damage: 10, knock: 0.4, react: 'down' });
     this.at(t + 2.6, () => {
       A.airTarget = 0;
       A.airRate = 6;
@@ -2069,14 +2466,39 @@ export class CombatEngine {
     const per = this.grid(this.heat > 0.65 ? 0.3 : 0.5);
     // Each side fights with its own weapon's vocabulary (its style's authored swings if it is the signature weapon)
     const swings = (f: Fighter): MoveName[] => (f.signature ? f.arch.light.concat(f.arch.heavy) : f.vocab.light.concat(f.vocab.heavy));
-    for (let t = s + 2; t <= s + 7 + 1e-6; t += per) {
-      const last = t > s + 7 - 1e-6;
-      const pool = swings(att).filter((m) => MOVES[m].weapon || RANGED_MOVES.has(m));
+    const choose = (f: Fighter, t: number) => {
+      const pool = swings(f).filter((m) => MOVES[m].weapon || RANGED_MOVES.has(m));
       const name = this.rng.choice(pool.length ? pool : SLASHES);
+      // The same blade twice in a row waits for its own follow-through (the other side may cut in)
+      return { name, slot: this.swingSlot(f, name, t, Math.max(per, 0.75)) };
+    };
+    // Musical timing: blows on the bar's rhythm, the shattering blow on beat three of the second bar
+    const fin = RHYTHM.enabled ? this.strongAfter(s + 5.5) : s + 7;
+    const slots = RHYTHM.enabled ? this.rhythmSlots(s + 2, fin, per).concat([fin]).filter((b, i, a) => a.indexOf(b) === i).sort((a, b) => a - b) : null;
+    for (let t = s + 2; t <= fin + 1e-6; t += per) {
+      if (slots) {
+        const at = this.pickSlot(slots, t);
+        if (at === undefined) break;
+        t = at;
+      }
+      const last = t > fin - 1e-6;
+      let c = choose(att, t);
+      if (last && c.slot.t > t + 1e-6) {
+        // Still following through: the other blade takes the last word
+        const tmp = att;
+        att = def;
+        def = tmp;
+        c = choose(att, t);
+      }
+      // No room before the finisher: let this beat go by
+      if (!last && c.slot.t > fin - 1e-6) continue;
+      if (!last) t = slots ? this.pickSlot(slots, c.slot.t) ?? fin : c.slot.t;
+      if (!last && t > fin - 1e-6) continue;
+      const name = c.name;
       if (last) {
         const fa = att;
         const fd = def;
-        this.strike(fa, fd, name, t, 1, 'hit', { critical: true });
+        this.strike(fa, fd, name, t, Math.max(1, c.slot.unit), 'hit', { critical: true });
         this.at(t, () => {
           if (!fd.weaponOn) return;
           fd.weaponOn = false;
@@ -2085,7 +2507,7 @@ export class CombatEngine {
       } else {
         const r = this.rng.next();
         const out: Outcome = r < 0.62 ? 'parry' : r < 0.8 ? 'dodge' : 'hit';
-        this.strike(att, def, name, t, Math.max(per, 0.75), out);
+        this.strike(att, def, name, t, c.slot.unit, out);
         if (this.rng.boolean(0.55)) {
           const tmp = att;
           att = def;
@@ -2099,7 +2521,7 @@ export class CombatEngine {
   /** Both throw the same kind of strike on every beat; fists (or blades) collide, until one gets through */
   private phraseMirror(s: number): number {
     const [a, b] = this.fighters;
-    const pick = (f: Fighter) => this.rng.choice(f.arch.light);
+    const pick = (f: Fighter) => this.rng.choice(f.pool('light'));
     const unit = this.grid(0.4);
     this.at(s, () => {
       const ra = reachOf(MOVES[pick(a)], a.base, a.weaponOn ? WEAPON_LENGTH[a.weapon] : 0, a.dims).sep;
@@ -2110,11 +2532,13 @@ export class CombatEngine {
       const t = s + k;
       const ma = pick(a);
       const mb = pick(b);
-      this.at(t - unit, () => {
-        a.play(MOVES[ma], t - unit, unit);
-        b.play(MOVES[mb], t - unit, unit);
-        if (MOVES[ma].weapon) { a.swingFrom = t - unit * 0.45; a.swingTo = t + unit * 0.15; }
-        if (MOVES[mb].weapon) { b.swingFrom = t - unit * 0.45; b.swingTo = t + unit * 0.15; }
+      // Blades on every beat: each swing starts when the last one has followed through
+      const ua = this.claimSwing(a, MOVES[ma], t, unit), ub = this.claimSwing(b, MOVES[mb], t, unit);
+      this.at(t - ua, () => a.play(MOVES[ma], t - ua, ua));
+      this.at(t - ub, () => b.play(MOVES[mb], t - ub, ub));
+      this.at(Math.min(t - ua, t - ub), () => {
+        if (MOVES[ma].weapon) { a.swingFrom = t - ua * 0.45; a.swingTo = t + ua * 0.15; }
+        if (MOVES[mb].weapon) { b.swingFrom = t - ub * 0.45; b.swingTo = t + ub * 0.15; }
       });
       this.at(t, () => {
         const pa = this.limbPos(a, MOVES[ma].limb ?? J.rHand, !!MOVES[ma].weapon);
@@ -2125,7 +2549,7 @@ export class CombatEngine {
     }
     const W = this.fighters[this.attacker]!;
     const L = this.fighters[1 - this.attacker]!;
-    this.strike(W, L, this.rng.choice(W.arch.heavy), s + 5, 1, 'hit', { critical: this.rng.boolean(0.5) });
+    this.strike(W, L, this.rng.choice(W.pool('heavy')), RHYTHM.enabled ? this.strongAfter(s + 4) : s + 5, 1, 'hit', { critical: this.rng.boolean(0.5) });
     return 6;
   }
 
@@ -2135,7 +2559,7 @@ export class CombatEngine {
     const [a, b] = this.fighters;
     this.stageTo(armed ? 1.7 : 0.95, 3, this.rng.range(-0.3, 0.3));
     for (const f of this.fighters) {
-      const swing = f.weaponOn ? this.rng.choice(f.arch.heavy.filter((m) => MOVES[m].weapon).concat(['slashDown'])) : 'cross';
+      const swing = f.weaponOn ? this.rng.choice(f.pool('heavy').filter((m) => MOVES[m].weapon).concat(['slashDown'])) : 'cross';
       this.play(f, swing, s, 1);
       this.at(s, () => { if (MOVES[swing].weapon) { f.swingFrom = s + 0.55; f.swingTo = s + 1.1; } });
     }
@@ -2153,7 +2577,7 @@ export class CombatEngine {
         this.emit('lock', [this.lock.x, this.lock.y, this.lock.z], this.dirBetween(a, b), 0.5 + k * 0.15, A.team, D.team);
       });
     }
-    const brk = s + 3.5;
+    const brk = RHYTHM.enabled ? this.strongAfter(s + 3.5) : s + 3.5;
     this.at(brk, () => {
       this.lock.active = false;
       const dir = this.dirBetween(A, D);
@@ -2169,7 +2593,7 @@ export class CombatEngine {
       this.strike(A, D, m, t, 0.5, this.rng.boolean(0.75) ? 'hit' : 'block', { damage: 3 });
       t += 0.5;
     }
-    this.strike(A, D, this.rng.choice(A.arch.heavy), t + 0.5, 0.75, this.rng.boolean(0.7) ? 'hit' : 'block', { critical: true });
+    this.strike(A, D, this.rng.choice(A.pool('heavy')), t + 0.5, 0.75, this.rng.boolean(0.7) ? 'hit' : 'block', { critical: true });
     return Math.ceil(t + 1.5 - s);
   }
 
@@ -2364,15 +2788,35 @@ export class CombatEngine {
     const t0 = s + 1;
     const n = beats * 4;
     const guard = this.rng.rangeInt(2, 4);
-    for (let k = 0; k < n; k++) {
-      const t = t0 + k * 0.25;
-      const out: Outcome = k < guard ? 'block' : 'hit';
-      this.strike(A, D, alt[k % alt.length]!, t, 0.3, out, { damage: 1.4, knock: 0.25 });
-      // The guard gives way
-      if (k === guard) this.at(t, () => this.emit('clash', D.joint(J.chest), this.dirBetween(A, D), 0.8, A.team, D.team));
+    const cuts = alt.filter((m) => isSwing(MOVES[m]));
+    if (A.weaponOn && cuts.length) {
+      // A blade cannot strike on sixteenths: a flurry of full cuts as fast as the weapon
+      // allows, each one chosen to start where the last one ended (forehand, backhand, …)
+      const end = t0 + beats - 0.25 + 1e-6;
+      let t = t0, k = 0, prev: MoveName | null = null;
+      while (t <= end) {
+        const name: MoveName = prev ? pickByPose(cuts, MOVES, impactPose(MOVES[prev], A.base), A.base, this.rng) : this.rng.choice(cuts);
+        const slot = this.swingSlot(A, name, t, 0.3, 0.25);
+        if (slot.t > end) break;
+        const out: Outcome = k < Math.min(guard, 2) ? 'block' : 'hit';
+        this.strike(A, D, name, slot.t, slot.unit, out, { damage: 2.4, knock: 0.35 });
+        if (k === Math.min(guard, 2)) this.at(slot.t, () => this.emit('clash', D.joint(J.chest), this.dirBetween(A, D), 0.8, A.team, D.team));
+        prev = name;
+        t = slot.t + 0.25;
+        k++;
+      }
+    } else {
+      for (let k = 0; k < n; k++) {
+        const t = t0 + k * 0.25;
+        const out: Outcome = k < guard ? 'block' : 'hit';
+        this.strike(A, D, alt[k % alt.length]!, t, 0.3, out, { damage: 1.4, knock: 0.25 });
+        // The guard gives way
+        if (k === guard) this.at(t, () => this.emit('clash', D.joint(J.chest), this.dirBetween(A, D), 0.8, A.team, D.team));
+      }
     }
-    const fin = t0 + beats + 1;
-    const launcher = A.arch.launchers.length ? this.rng.choice(A.arch.launchers) : 'uppercut';
+    const fin = RHYTHM.enabled ? this.strongAfter(t0 + beats + 1) : t0 + beats + 1;
+    const launchers = A.pool('launchers');
+    const launcher = launchers.length ? this.rng.choice(launchers) : 'uppercut';
     this.strike(A, D, launcher, fin, 0.75, 'hit', { critical: true, damage: 9, knock: 1.6, react: 'launched' });
     this.at(fin + 1.4, () => {
       D.airTarget = 0;
@@ -2391,12 +2835,13 @@ export class CombatEngine {
       let t = s + 1;
       for (let k = 0; k < n; k++) {
         const ang = (this.rng.boolean() ? 1 : -1) * this.rng.range(1.2, 2.4);
-        this.teleport(A, D, ang, 1.4, t);
-        this.strike(A, D, moves(), t + 0.75, 0.5, k === n - 1 ? 'hit' : this.rng.boolean(0.6) ? 'hit' : 'block', { damage: 3, knock: 0.6 });
+        const shift = RHYTHM.enabled ? 0.25 : 0;
+        this.teleport(A, D, ang, 1.4, t + shift);
+        this.strike(A, D, moves(), t + 0.75 + shift, 0.5, k === n - 1 ? 'hit' : this.rng.boolean(0.6) ? 'hit' : 'block', { damage: 3, knock: 0.6 });
         t += 1;
       }
       this.velocityBreak(A, D, t);
-      this.strike(A, D, this.rng.choice(A.arch.heavy), t + 1, 1, 'hit', { critical: true, damage: 10 });
+      this.strike(A, D, this.rng.choice(A.pool('heavy')), t + 1, 1, 'hit', { critical: true, damage: 10 });
       return Math.ceil(t + 2.5 - s);
     }
     if (r < 0.7) {
@@ -2409,7 +2854,7 @@ export class CombatEngine {
       const t = s + 3;
       ph.forEach((c) => this.strike(c, D, moves(), t, 1, 'hit', { damage: 3, knock: 0.3 }));
       this.teleport(A, D, Math.PI * 0.9, 1.3, s + 1.8);
-      this.strike(A, D, this.rng.choice(A.arch.heavy), t, 1, 'hit', { critical: true, damage: 10, react: 'launched' });
+      this.strike(A, D, this.rng.choice(A.pool('heavy')), t, 1, 'hit', { critical: true, damage: 10, react: 'launched' });
       this.popClones(t + 0.5);
       return 6;
     }
@@ -2423,7 +2868,7 @@ export class CombatEngine {
     this.impact(A, D, through + 0.13, { damage: 6, knock: 5, element: A.element(), react: 'hitSpin' });
     this.velocityBreak(A, D, through + 1.5);
     this.teleport(A, D, 0, 1.2, through + 2.3);
-    this.strike(A, D, this.rng.choice(A.arch.heavy), through + 3.3, 1, 'hit', { critical: true, damage: 9 });
+    this.strike(A, D, this.rng.choice(A.pool('heavy')), through + 3.3, 1, 'hit', { critical: true, damage: 9 });
     return 6;
   }
 
@@ -2601,13 +3046,15 @@ export class CombatEngine {
     const A = this.fighters[p.owner]!;
     const pos: Vector3Tuple = [p.x, p.y, p.z];
     const dir: Vector3Tuple = [p.dx, p.dy, p.dz];
+    // On the beat it was fired to arrive at, whatever the frame rate
+    const at = p.t0 + p.dur;
     if (p.outcome === 'hit' && !D.dead) {
       p.active = false;
-      this.react(D, p.big ? 'hitBig' : 'hitBody', this.beat, 0.8);
+      this.react(D, p.big ? 'hitBig' : 'hitBody', at, 0.8);
       this.knock(D, dir, p.big ? 10 : 2);
       D.hitFlash = 1;
       this.emit('projectile_hit', pos, dir, p.big ? 1 : 0.45, A.team, D.team, { critical: p.big });
-      this.damage(D, p.big ? 16 : 2, A.team, this.beat);
+      this.damage(D, p.big ? 16 : 2, A.team, at);
       return;
     }
     if (p.outcome === 'ground') {
@@ -2625,7 +3072,7 @@ export class CombatEngine {
     p.cx = (p.sx + p.ex) / 2;
     p.cy = p.y + this.rng.range(0.5, 2.5);
     p.cz = (p.sz + p.ez) / 2;
-    p.t0 = this.beat;
+    p.t0 = at;
     p.dur = 0.6;
     p.outcome = 'ground';
   }
@@ -2649,7 +3096,11 @@ export class CombatEngine {
         this.fire(A, D, A.joint(hand), tt, 1, false, out);
       });
       if (out === 'parry') this.play(D, 'parry', tt + 0.5, 0.5);
-      if (out === 'dodge' && this.rng.boolean(0.5)) this.play(D, this.rng.choice(D.arch.dodges), tt + 0.55, 0.5);
+      if (out === 'dodge' && this.rng.boolean(0.5)) {
+        // Out of the way as the blast arrives (a beat after it is fired)
+        const dm = this.rng.choice(D.arch.dodges);
+        this.play(D, dm, RHYTHM.enabled ? tt + 1 - 0.5 * accentOf(MOVES[dm]) : tt + 0.55, 0.5);
+      }
     }
     this.at(s + 5, () => {
       A.play(MOVES.palmWind, s + 5, 0.6);
@@ -2719,7 +3170,7 @@ export class CombatEngine {
   }
 
   private phraseAir(s: number, A: Fighter, D: Fighter): number {
-    const launcher = this.rng.choice(A.arch.launchers);
+    const launcher = this.rng.choice(A.pool('launchers'));
     this.strike(A, D, launcher, s + 1, 1, 'hit', { damage: 5, knock: 0.2, react: 'launched' });
     this.juggle(A, D, s + 1);
     return 8;
@@ -3046,9 +3497,9 @@ export class CombatEngine {
       len = ult.run(this, s, W, L);
       this.phrase = 'ultra';
     } else {
-      this.strike(W, L, this.rng.choice(W.arch.light), s + 1, 1, 'block');
-      this.strike(L, W, this.rng.choice(L.arch.light), s + 2, 1, 'parry');
-      this.strike(W, L, this.rng.choice(W.arch.heavy), s + 3, 1, 'hit', { critical: true, damage: 999 });
+      this.strike(W, L, this.rng.choice(W.pool('light')), s + 1, 1, 'block');
+      this.strike(L, W, this.rng.choice(L.pool('light')), s + 2, 1, 'parry');
+      this.strike(W, L, this.rng.choice(W.pool('heavy')), s + 3, 1, 'hit', { critical: true, damage: 999 });
       this.phrase = 'finisher';
       len = 8;
     }

@@ -1,6 +1,7 @@
 import { IAudioEngine, AudioEngineEvents } from './types';
 import { MusicTrackMetadata } from '../types/music';
-import { analyzeSong, SongAnalysis } from './SongAnalyzer';
+import { SongAnalysis, toMono } from './SongAnalyzer';
+import { analyzeInBackground } from './analysis/analyzeAsync';
 
 /**
  * Robust Web Audio API engine.
@@ -142,9 +143,9 @@ export class AudioEngine implements IAudioEngine {
     try {
       const bytes = source instanceof File ? await source.arrayBuffer() : await (await fetch(url)).arrayBuffer();
       const decoded = await ctx.decodeAudioData(bytes);
-      // Let the UI paint the "analysing" state before the (synchronous) analysis
+      // Let the UI paint the "analysing" state (the analysis itself runs in a worker when it can)
       await new Promise((r) => setTimeout(r, 30));
-      this.analysis = analyzeSong(decoded);
+      this.analysis = await analyzeInBackground(toMono(decoded), decoded.sampleRate);
     } catch (e) {
       console.warn('Track analysis failed, falling back to live beat tracking:', e);
     }

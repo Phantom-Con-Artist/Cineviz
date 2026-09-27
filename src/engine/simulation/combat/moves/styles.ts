@@ -105,7 +105,7 @@ const SHINOBI = {
     { rShP: 1.4, rShA: 1.2, rEl: 0.4, twist: -0.9, lean: 0.35, rootX: 0.35 }),
   sh_reverseStab: swing(
     { rShP: 1.8, rEl: 2.0, twist: 0.5, lean: 0.1 },
-    { rShP: 1.2, rEl: 0.9, twist: -0.5, lean: 0.55, rootX: 0.4, lKn: 1.3, rKn: 1.1 }),
+    { rShP: 1.2, rEl: 0.9, twist: -0.5, lean: 0.55, rootX: 0.4, lKn: 1.3, rKn: 1.1 }, { thrust: true }),
   sh_gentlePalm: strike(J.lHand,
     { lShP: 0.8, lEl: 2.0, twist: 0.5, lKn: 1.0, rKn: 1.0 },
     { lShP: 1.55, lEl: 0.05, twist: -0.5, lean: 0.3, rootX: 0.35, lKn: 1.2, rKn: 0.8 }),
@@ -208,7 +208,7 @@ const REAPER = {
     two({ rShP: 1.45, rShA: 0.9, rEl: 0.1, twist: -1.1, lean: 0.25, rootX: 0.3 })),
   rp_tsuki: swing(
     two({ rShP: 1.0, rEl: 1.6, twist: 0.3, lean: -0.1 }),
-    two({ rShP: 1.55, rEl: 0.02, twist: -0.2, lean: 0.5, rootX: 0.6, lKn: 1.0, rHipP: -0.8 })),
+    two({ rShP: 1.55, rEl: 0.02, twist: -0.2, lean: 0.5, rootX: 0.6, lKn: 1.0, rHipP: -0.8 }), { thrust: true }),
   rp_flashCut: swing(
     two({ rShP: 1.0, rShA: -0.6, rEl: 0.6, twist: 1.0, lean: 0.6, lKn: 1.4, rKn: 1.2 }),
     two({ rShP: 1.3, rShA: 1.0, rEl: 0.05, twist: -1.2, lean: 0.7, rootX: 0.9, lKn: 1.4, rKn: 0.9, lHipP: 1.0 }), { power: 1.2 }),
@@ -350,7 +350,7 @@ const TARNISHED = {
     { rHipP: 1.4, rKn: 0.05, lean: -0.3, rootX: 0.3 }, { wt: 0.5 }),
   tn_thrustLunge: swing(
     two({ rShP: 1.0, rEl: 1.5, twist: 0.5, lean: -0.1 }),
-    two({ rShP: 1.55, rEl: 0.02, twist: -0.3, lean: 0.55, rootX: 0.8, lKn: 1.2, rHipP: -1.0 }), { power: 1.3 }),
+    two({ rShP: 1.55, rEl: 0.02, twist: -0.3, lean: 0.55, rootX: 0.8, lKn: 1.2, rHipP: -1.0 }), { power: 1.3, thrust: true }),
   tn_spinSweep: {
     limb: J.rHand,
     weapon: true,
@@ -399,7 +399,7 @@ const DANCER = {
   },
   bd_lungeStab: swing(
     { rShP: 0.9, rEl: 1.9, twist: 0.9, lean: -0.2 },
-    { rShP: 1.55, rEl: 0.02, twist: -0.8, lean: 0.6, rootX: 0.8, lKn: 1.3, rHipP: -1.0, lShA: 1.2, lShP: -0.3 }, { power: 1.2 }),
+    { rShP: 1.55, rEl: 0.02, twist: -0.8, lean: 0.6, rootX: 0.8, lKn: 1.3, rHipP: -1.0, lShA: 1.2, lShP: -0.3 }, { power: 1.2, thrust: true }),
   bd_stepCut: swing(
     { rShP: 1.3, rShA: -0.5, rEl: 0.5, twist: 0.9, rootZ: -0.3 },
     { rShP: 1.4, rShA: 1.1, rEl: 0.1, twist: -1.0, lean: 0.3, rootX: 0.35, rootZ: 0.4, tilt: -0.3 }),
@@ -466,7 +466,7 @@ const HUNTER = {
     two({ rShP: 0.6, rEl: 0.1, twist: -0.3, lean: 0.5, rootX: 0.4 }), { zone: 'high' }),
   ht_thrust: swing(
     two({ rShP: 1.1, rEl: 1.5, twist: 0.4 }),
-    two({ rShP: 1.6, rEl: 0.02, twist: -0.3, lean: 0.5, rootX: 0.5 })),
+    two({ rShP: 1.6, rEl: 0.02, twist: -0.3, lean: 0.5, rootX: 0.5 }), { thrust: true }),
   ht_risingSlash: swing(
     two({ rShP: 0.1, rEl: 0.2, lean: 0.4, twist: 0.3 }),
     two({ rShP: 2.7, rEl: 0.2, lean: -0.2 }), { launch: true, zone: 'high' }),
@@ -521,10 +521,11 @@ const HUNTER = {
 const SOVEREIGN = {
   sv_thrust: swing(
     two({ rShP: 0.8, rEl: 1.2, twist: 0.8, lean: -0.1 }),
-    two({ rShP: 1.5, rEl: 0.02, twist: -0.2, lean: 0.45, rootX: 0.55 })),
+    two({ rShP: 1.5, rEl: 0.02, twist: -0.2, lean: 0.45, rootX: 0.55 }), { thrust: true }),
   sv_doubleThrust: {
     limb: J.rHand,
     weapon: true,
+    thrust: true,
     hits: [0.5],
     keys: [
       K(0.3, two({ rShP: 0.8, rEl: 1.2, twist: 0.8 })),
@@ -559,7 +560,7 @@ const SOVEREIGN = {
   },
   sv_pierceDash: swing(
     two({ rShP: 0.9, rEl: 1.3, twist: 0.9, lean: 0.5, lKn: 1.3 }),
-    two({ rShP: 1.5, rEl: 0.02, twist: -0.2, lean: 0.75, rootX: 1.0, lKn: 1.0, rHipP: -1.0 }), { power: 1.4 }),
+    two({ rShP: 1.5, rEl: 0.02, twist: -0.2, lean: 0.75, rootX: 1.0, lKn: 1.0, rHipP: -1.0 }), { power: 1.4, thrust: true }),
   sv_highArc: swing(
     two({ rShP: 3.0, rEl: 0.6 }),
     two({ rShP: 0.8, rEl: 0.05, lean: 0.5, rootX: 0.35 }), { zone: 'high' }),
@@ -568,10 +569,11 @@ const SOVEREIGN = {
     { rShP: 0.4, rEl: 1.8, twist: 0.7, rootX: 0.2, lean: 0.2 }),
   sv_risingThrust: swing(
     two({ rShP: 0.3, rEl: 0.8, lean: 0.5, lKn: 1.3 }),
-    two({ rShP: 2.2, rEl: 0.05, lean: -0.2, rootY: 0.3 }), { launch: true, zone: 'high' }),
+    two({ rShP: 2.2, rEl: 0.05, lean: -0.2, rootY: 0.3 }), { launch: true, zone: 'high', thrust: true }),
   sv_backThrust: {
     limb: J.rHand,
     weapon: true,
+    thrust: true,
     power: 1.2,
     keys: [
       K(0.5, { spin: 2.0, ...two({ rShP: 1.0, rEl: 1.3 }) }, 'in'),

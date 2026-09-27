@@ -259,11 +259,12 @@ export class WeaponCloud {
     out[0] = this.pos[i * 3]!; out[1] = this.pos[i * 3 + 1]!; out[2] = this.pos[i * 3 + 2]!;
   }
 
-  /** Hand frame: a along the forearm, c across in the swing plane, b = c × a */
+  /** Hand frame: a along the held weapon (the right hand's blade axis, else the forearm), c across in the swing plane, b = c × a */
   private handFrame(f: Fighter, el: number, hand: number, out: Frame): void {
     const j = f.joints;
     const hx = j[hand * 3]!, hy = j[hand * 3 + 1]!, hz = j[hand * 3 + 2]!;
-    let ax = hx - j[el * 3]!, ay = hy - j[el * 3 + 1]!, az = hz - j[el * 3 + 2]!;
+    const bl = hand === J.rHand ? f.blade : null;
+    let ax = bl ? bl[0]! : hx - j[el * 3]!, ay = bl ? bl[1]! : hy - j[el * 3 + 1]!, az = bl ? bl[2]! : hz - j[el * 3 + 2]!;
     const al = Math.hypot(ax, ay, az) || 1;
     ax /= al; ay /= al; az /= al;
     const rx = -Math.sin(f.facing), rz = Math.cos(f.facing);

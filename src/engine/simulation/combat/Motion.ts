@@ -2,6 +2,7 @@ import { clamp, damp, smoothstep, wobble, wrapAngle } from '../../../utils/math'
 import { SeededRandom } from '../../../utils/random';
 import { J, P, PARAM_COUNT } from './Skeleton';
 import type { MoveInstance } from './Moves';
+import { bladeOf, SWING_LAYER, wristFor, WRIST_NEUTRAL } from './BladePath';
 import { CHAIN_FRACTION, MECHANICS, MotionVariation, NEUTRAL_VARIATION, PRIOR, sampleVariation } from './MotionPrior';
 
 /**
@@ -77,6 +78,20 @@ const STANCE_VAR: [number, number][] = [
   [P.lHipA, 0.04], [P.rHipA, 0.04], [P.lHipP, 0.04], [P.rHipP, 0.04], [P.rootZ, 0.015],
 ];
 
+/** Where a blow lands on the body */
+export type HitRegion = 'head' | 'torso' | 'shoulderL' | 'shoulderR' | 'hips' | 'legL' | 'legR';
+
+/** How much of each part of the reaction a region gets (1 = the generic flinch) */
+const REGION: Record<HitRegion, { head: number; lean: number; root: number; knees: number; base: number }> = {
+  head: { head: 2, lean: 0.6, root: 0.7, knees: 0.5, base: 0.8 },
+  torso: { head: 1, lean: 1, root: 1, knees: 1, base: 1 },
+  shoulderL: { head: 0.8, lean: 0.7, root: 0.8, knees: 0.7, base: 0.9 },
+  shoulderR: { head: 0.8, lean: 0.7, root: 0.8, knees: 0.7, base: 0.9 },
+  hips: { head: 0.6, lean: 0.8, root: 1.6, knees: 1.4, base: 1.2 },
+  legL: { head: 0.5, lean: 0.5, root: 0.8, knees: 1, base: 1.3 },
+  legR: { head: 0.5, lean: 0.5, root: 0.8, knees: 1, base: 1.3 },
+};
+
 /** Everything the motion layer needs to know about the actor this frame */
 export interface MotionInput {
   dt: number;
@@ -98,7 +113,21 @@ export interface MotionInput {
   /** Vertical speed (m/s) of a touchdown that happened this frame, else 0 */
   landing: number;
   heat: number;
+  /** Tempo (beats per minute) */
+  bpm?: number;
+  /** Beat position within the bar (0 = downbeat), or −1 when the bar is not known */
+  bar?: number;
+  /** How strongly the body carries the beat (0 … 1): the music's energy, calm in a breakdown */
+  groove?: number;
+  /** Groove on every other beat (half-time feel: quiet music, relaxed stances) */
+  halfTime?: boolean;
 }
+
+/** Off for A/B measurements: the V1 knee bounce instead of the groove (tests / benchmarks) */
+export const GROOVE = { enabled: true };
+
+/** Downbeat-weighted accents: the body settles hardest on the one, a little less on three */
+const BAR_ACCENT = [1.35, 0.85, 1.1, 0.85];
 
 export class MotionBody {
   /** The physically simulated pose that gets solved into joints */
@@ -108,12 +137,24 @@ export class MotionBody {
   /** This fighter's personal execution, drawn from the spread between mocap performers */
   variation: MotionVariation = NEUTRAL_VARIATION;
   gait = 0;
+  /**
+   * The held blade's direction in the fighter's frame (BladePath.ts), sprung like the
+   * joints so it never snaps when one swing takes over from another, and `wrist`: the same
+   * direction in the right forearm's frame (what the renderer turns the forearm by).
+   */
+  readonly blade = Float32Array.of(1, 0, 0);
+  readonly wrist = Float32Array.from(WRIST_NEUTRAL);
+  private readonly bladeVel = new Float32Array(3);
+  private readonly bladeTgt = Float32Array.of(1, 0, 0);
+  private bladeSet = false;
 
   private readonly tgt = new Float32Array(PARAM_COUNT);
   private readonly scratch = new Float32Array(PARAM_COUNT);
   private readonly w = new Float32Array(PARAM_COUNT);
   private readonly z = new Float32Array(PARAM_COUNT);
   private readonly lead = new Float32Array(GROUPS);
+  /** The kinetic chain's part of `lead` (hips before torso before arm), full only in strikes */
+  private readonly chainLead = new Float32Array(GROUPS);
   private readonly stanceOff = new Float32Array(PARAM_COUNT);
   private readonly moveVar = new Float32Array(PARAM_COUNT);
   private timeSkew = 0;
@@ -145,6 +186,8 @@ export class MotionBody {
   private stepDx = 0;
   private stepDz = 0;
   private stepLeg = 0;
+  /** A leg hit decides which leg catches the fall (−1: whichever) */
+  private nextStepLeg = -1;
   private landDip = 0;
 
   constructor(private readonly team: number) {
@@ -187,7 +230,10 @@ export class MotionBody {
       sum[g]! += (2 * this.z[i]!) / this.w[i]!;
       cnt[g]! += 1;
     }
-    for (let g = 0; g < GROUPS; g++) this.lead[g] = Math.min(MAX_LEAD, (sum[g]! / cnt[g]!) * 0.85 + CHAIN[g]! * p.reactionSpeed);
+    for (let g = 0; g < GROUPS; g++) {
+      this.lead[g] = Math.min(MAX_LEAD, (sum[g]! / cnt[g]!) * 0.85 + CHAIN[g]! * p.reactionSpeed);
+      this.chainLead[g] = Math.min(this.lead[g]!, CHAIN[g]! * p.reactionSpeed);
+    }
     // The head is left to lag (secondary motion), whole-body rotation just keeps up
     this.lead[4] = 0.015;
   }
@@ -208,6 +254,9 @@ export class MotionBody {
   snap(pose: Float32Array): void {
     this.body.set(pose);
     this.vel.fill(0);
+    this.wrist.set(WRIST_NEUTRAL);
+    this.blade.set(bladeOf(pose));
+    this.bladeVel.fill(0);
     this.cx = this.cz = this.cvx = this.cvz = 0;
     this.stepT = -1;
     this.landDip = 0;
@@ -220,6 +269,8 @@ export class MotionBody {
     this.setProfile(o.profile);
     this.variation = o.variation;
     this.snap(o.body);
+    this.wrist.set(o.wrist);
+    this.blade.set(o.blade);
   }
 
   // ---------------------------------------------------------------- move sampling
@@ -241,10 +292,13 @@ export class MotionBody {
     const sc = this.scratch;
     const V = this.variation;
     const kind = move.kind;
+    // A weapon swing is not a punch past the impact: no hold at full reach, and its own
+    // follow-through (Moves.ts) keeps the speed continuous, so time is not warped
+    const swing = move.swing;
     const accel = kind ? Math.max(0.05, (1 - move.windT) * move.unit * spb) : 0;
     const hold = kind ? ((PRIOR[kind].nearMaxHoldMs.mean / 1000) * (V.followThrough - 1)) / Math.max(0.05, move.unit * spb) : 0;
     const warp = (b: number) => {
-      if (!kind) return b;
+      if (!kind || swing) return b;
       const u = move.progress(b);
       if (u <= 1) return b;
       const after = u - 1;
@@ -253,12 +307,19 @@ export class MotionBody {
     for (let g = 0; g < GROUPS; g++) {
       const skew = g < 3 ? this.timeSkew : 0;
       // (0.7: the springs already add part of the proximal-to-distal delay)
-      const chain = kind && g < 4 ? Math.min(MAX_CHAIN, (0.7 * CHAIN_FRACTION[kind][g]! * accel) / V.attackSpeed) : 0;
+      // (a swing's arm is one group: shoulder, elbow and wrist move as one lever)
+      const chain = kind && g < 4 ? Math.min(MAX_CHAIN, ((swing ? 0.5 : 0.7) * CHAIN_FRACTION[kind][g]! * accel) / V.attackSpeed) : 0;
       // The prior's late acceleration leaves the tip still travelling fast at contact; the
       // springs would deliver it this late / early, so the striking limb reads a bit further ahead
-      const arrive = kind && g >= 2 && g <= 3 ? ARRIVAL[kind] : 0;
-      move.evaluate(warp(beat + (this.lead[g]! + skew + chain + arrive) * toBeat), sc);
+      const arrive = kind && !swing && g >= 2 && g <= 3 ? ARRIVAL[kind] : 0;
+      // Outside strikes only a trace of the chain: a walk's footfalls, a guard or a taunt
+      // arrive on their keys (which sit on the music's grid)
+      const lead = kind || !GROOVE.enabled ? this.lead[g]! : this.lead[g]! - 0.7 * this.chainLead[g]!;
+      const at = warp(beat + (lead + skew + chain + arrive) * toBeat);
+      move.evaluate(at, sc);
       for (let i = 0; i < PARAM_COUNT; i++) if (this.group[i] === g) out[i] = sc[i]!;
+      // The blade follows its path in step with the forearm that carries it
+      if (g === 3 && move.bladeAt(at, this.bladeTgt)) this.bladeSet = true;
       if (g === 0) this.pelvisTwist = sc[P.twist]!;
     }
     out[P.hipTwist] = 0;
@@ -286,6 +347,10 @@ export class MotionBody {
     this.timeSkew = r.range(-0.012, 0.028) / Math.max(0.6, this.profile.reactionSpeed) + this.variation.reactionDelay;
     // Chain groups: the striking limb splits into proximal (shoulder / hip) and distal (elbow / knee)
     this.group.set(GROUP);
+    if (move.swing) {
+      this.group[P.rShP] = 3;
+      this.group[P.rShA] = 3;
+    }
     const l = move.def.limb;
     this.strikeSide = l === J.lHand || l === J.lFoot || l === J.lKn || l === J.lEl ? -1 : 1;
     if (move.kind === 'kick') {
@@ -302,29 +367,53 @@ export class MotionBody {
     this.vel[i]! += peak * this.w[i]! * 2;
   }
 
-  /** A blow (or shove) arriving in the actor's local frame: lx forward, lz right, strength ~ knock */
-  push(lx: number, lz: number, strength: number): void {
+  /**
+   * A blow (or shove) arriving in the actor's local frame: lx forward, lz right, strength
+   * ~ knock. Where it lands shapes the reaction (not one generic flinch):
+   *
+   *   head       the head snaps with the blow, the spine follows less, knees barely give
+   *   torso      the body folds around the blow and the centre of mass is shoved
+   *   shoulder   that shoulder is driven back: the chest turns, the hips counter-turn,
+   *              the arm on that side flies out
+   *   hips       the pelvis is displaced, knees buckle, the base shifts
+   *   leg        that knee buckles and the support is gone: a stumble step with the other leg
+   */
+  push(lx: number, lz: number, strength: number, region: HitRegion = 'torso'): void {
     const p = this.profile;
     const s = clamp(strength, 0, 12) / p.mass;
     const damper = 1 / Math.sqrt(p.balance);
-    this.cvx = clamp(this.cvx + lx * 0.3 * s * damper, -4, 4);
-    this.cvz = clamp(this.cvz + lz * 0.3 * s * damper, -4, 4);
+    const R = REGION[region];
+    this.cvx = clamp(this.cvx + lx * 0.3 * s * damper * R.base, -4, 4);
+    this.cvz = clamp(this.cvz + lz * 0.3 * s * damper * R.base, -4, 4);
     const j = () => this.rng.range(0.8, 1.2);
     // Upper body moves first (head snaps, torso folds), pelvis and arms follow
-    this.kickPeak(P.head, clamp(lx * 0.09 * s, -0.6, 0.6) * j());
-    this.kickPeak(P.lean, clamp(lx * 0.05 * s, -0.5, 0.5) * j());
-    this.kickPeak(P.tilt, clamp(lz * 0.05 * s, -0.4, 0.4) * j());
-    this.kickPeak(P.twist, clamp(-lz * 0.06 * s + this.rng.gaussian(0, 0.015 * s), -0.5, 0.5));
-    this.kickPeak(P.rootX, clamp(lx * 0.02 * s, -0.15, 0.15));
-    this.kickPeak(P.rootZ, clamp(lz * 0.02 * s, -0.15, 0.15));
+    this.kickPeak(P.head, clamp(lx * 0.09 * s * R.head, -0.8, 0.8) * j());
+    // A body blow folds the torso over it whichever way it came from; elsewhere the lean follows the push
+    const fold = region === 'torso' ? Math.abs(lx) * 0.06 * s : lx * 0.05 * s * R.lean;
+    this.kickPeak(P.lean, clamp(fold, -0.5, 0.5) * j());
+    this.kickPeak(P.tilt, clamp(lz * 0.05 * s * R.lean, -0.4, 0.4) * j());
+    // Shoulders: the struck side goes back (+twist brings the left shoulder forward)
+    const turn = region === 'shoulderR' ? 1 : region === 'shoulderL' ? -1 : 0;
+    this.kickPeak(P.twist, clamp(-lz * 0.06 * s + turn * Math.abs(lx) * 0.09 * s + this.rng.gaussian(0, 0.015 * s), -0.6, 0.6));
+    if (turn) this.kickPeak(P.hipTwist, clamp(-turn * Math.abs(lx) * 0.04 * s, -0.3, 0.3));
+    this.kickPeak(P.rootX, clamp(lx * 0.02 * s * R.root, -0.18, 0.18));
+    this.kickPeak(P.rootZ, clamp(lz * 0.02 * s * R.root, -0.18, 0.18));
     const flail = clamp(0.035 * s, 0, 0.45);
-    this.kickPeak(P.lShA, flail * j());
-    this.kickPeak(P.rShA, flail * j());
+    this.kickPeak(P.lShA, flail * j() * (turn < 0 ? 1.8 : 1));
+    this.kickPeak(P.rShA, flail * j() * (turn > 0 ? 1.8 : 1));
     this.kickPeak(P.lShP, clamp(-lx * 0.06 * s, -0.5, 0.5) * j());
     this.kickPeak(P.rShP, clamp(-lx * 0.06 * s, -0.5, 0.5) * j());
-    const buckle = clamp(0.03 * s, 0, 0.35);
-    this.kickPeak(P.lKn, buckle);
-    this.kickPeak(P.rKn, buckle * 0.9);
+    const buckle = clamp(0.03 * s * R.knees, 0, 0.5);
+    const legL = region === 'legL' ? 2.2 : region === 'legR' ? 0.5 : 1;
+    const legR = region === 'legR' ? 2.2 : region === 'legL' ? 0.5 : 1;
+    this.kickPeak(P.lKn, buckle * legL);
+    this.kickPeak(P.rKn, buckle * 0.9 * legR);
+    if (region === 'legL' || region === 'legR') {
+      // The struck leg is swept back; the body falls towards it and catches itself with the other
+      this.kickPeak(region === 'legL' ? P.lHipP : P.rHipP, clamp(-0.05 * s, -0.4, 0));
+      this.cvz += (region === 'legL' ? -1 : 1) * 0.12 * s * damper;
+      this.nextStepLeg = region === 'legL' ? 1 : 0;
+    }
   }
 
   /** What the attacker's own body does when the blow lands (or whiffs) */
@@ -358,15 +447,47 @@ export class MotionBody {
     T.set(k.pose);
     this.micro(k, T);
     this.imperfection(k, T);
+    this.groove(k, T);
     this.locomotion(k, dt, T);
     this.weightTransfer(k, T);
     this.balance(k, dt, T);
     this.secondary(T);
     this.integrate(dt, T);
+    this.stepBlade(dt);
     if (k.dt > 0.3) this.body.set(T);
     // Physical limits: no backwards knees or elbows
     const b = this.body;
     for (const i of [P.lKn, P.rKn, P.lEl, P.rEl]) if (b[i]! < -0.02) b[i] = -0.02;
+  }
+
+  /**
+   * Blade spring (fighter frame). In a swing it follows the blade path as fast as the arm
+   * follows its keys; otherwise it settles back along the forearm, snugly (a held weapon
+   * does not trail the hand). Then the wrist is solved against the actual forearm.
+   */
+  private stepBlade(dt: number): void {
+    const swinging = this.bladeSet;
+    this.bladeSet = false;
+    if (!SWING_LAYER.enabled) {
+      // V1: the blade is the forearm
+      this.blade.set(bladeOf(this.body));
+      this.wrist.set(WRIST_NEUTRAL);
+      return;
+    }
+    if (!swinging) this.bladeTgt.set(bladeOf(this.body));
+    const w = this.w[P.rEl]! * (swinging ? 1 : 1.6), z = swinging ? 0.8 : 1;
+    const n = clamp(Math.ceil(dt * 120), 1, 8), h = dt / n;
+    const x = this.blade, v = this.bladeVel, T = this.bladeTgt;
+    for (let s = 0; s < n; s++) {
+      for (let i = 0; i < 3; i++) {
+        v[i]! += (w * w * (T[i]! - x[i]!) - 2 * z * w * v[i]!) * h;
+        x[i]! += v[i]! * h;
+      }
+    }
+    if (dt > 0.3) x.set(T);
+    const l = Math.hypot(x[0]!, x[1]!, x[2]!) || 1;
+    for (let i = 0; i < 3; i++) x[i]! /= l;
+    wristFor(this.body, x, this.wrist);
   }
 
   private integrate(dt: number, T: Float32Array): void {
@@ -426,6 +547,48 @@ export class MotionBody {
     for (const [i] of STANCE_VAR) T[i]! += this.stanceOff[i]! * drift * stanceScale + this.moveVar[i]! * env;
   }
 
+  /**
+   * The music in the body. A fighter never stands still between blows: the body sinks
+   * onto every beat (a sharp V-shaped low point, so the visible accent is the beat itself,
+   * read ahead by the knee springs' lag), rocks its weight over two beats and pumps its
+   * guard with the bounce. Downbeats land heavier. Quiet music halves the pulse (a slow
+   * sway); a strike or a step in progress keeps only a trace of it.
+   */
+  private groove(k: MotionInput, T: Float32Array): void {
+    const A = k.groove ?? 0;
+    if (A <= 1e-3 || !k.bpm || !GROOVE.enabled) return;
+    const toBeat = k.bpm / 60;
+    const lag = (2 * this.z[P.lKn]!) / this.w[P.lKn]! * 0.85;
+    const b = k.beat + lag * toBeat;
+    const period = k.halfTime ? 2 : 1;
+    const ph = (((b / period) % 1) + 1) % 1;
+    const dip = Math.pow(1 - Math.sin(Math.PI * ph), 2);
+    // Which beat of the bar the coming low point is (the bar position moves with the read-ahead)
+    const pos = (k.bar !== undefined && k.bar >= 0 ? k.bar : k.beat) + (b - k.beat);
+    const bar = BAR_ACCENT[Math.floor((((pos + 0.5) % 4) + 4) % 4) % 4]!;
+    // A move in progress keeps a trace of the pulse; a held pose (a finished move, casting,
+    // posing while the pets or the projectiles work) carries all of it
+    const busy = k.move && k.beat < k.move.endBeat() ? 0.35 : 1;
+    const walking = clamp(k.speed / 1.2);
+    const a = A * bar * busy;
+    const legs = k.legsFree ? a * (1 - 0.5 * walking) : 0;
+    T[P.lKn]! += 0.2 * legs * dip;
+    T[P.rKn]! += 0.18 * legs * dip;
+    T[P.lHipP]! += 0.08 * legs * dip;
+    T[P.rHipP]! += 0.07 * legs * dip;
+    T[P.lean]! += 0.04 * a * dip;
+    T[P.head]! += 0.035 * a * dip;
+    // The guard rides the bounce
+    T[P.lShP]! -= 0.06 * a * dip;
+    T[P.rShP]! -= 0.06 * a * dip;
+    T[P.lEl]! += 0.05 * a * dip;
+    T[P.rEl]! += 0.05 * a * dip;
+    // Weight rocks side to side over two beats
+    const rock = Math.sin(Math.PI * b) * A * busy * (k.legsFree ? 1 : 0);
+    T[P.rootZ]! += 0.03 * rock;
+    T[P.tilt]! += 0.045 * rock;
+  }
+
   /** Stepping while travelling, plus everything that gives a moving body inertia */
   private locomotion(k: MotionInput, dt: number, T: Float32Array): void {
     const p = this.profile;
@@ -435,7 +598,20 @@ export class MotionBody {
       const dir = k.vlx < -0.1 ? -1 : 1;
       // Stride length varies a little from step to step
       const stride = this.stride * (1 + 0.1 * Math.sin(this.gait * 0.37 + this.phase[9]!));
-      this.gait += ((k.speed * dt) / stride) * Math.PI * dir;
+      if (k.bpm && (k.groove ?? 0) > 0 && GROOVE.enabled) {
+        // Footfalls on the music: the natural cadence rounded to ½, 1, 2 or 3 steps a beat,
+        // its phase pulled onto the grid (a foot lands on each step's beat)
+        const perBeat = ((k.speed / stride) * 60) / k.bpm;
+        let q = 0.5;
+        for (const c of [1, 2, 3]) if (Math.abs(Math.log(c / perBeat)) < Math.abs(Math.log(q / perBeat))) q = c;
+        this.gait += Math.PI * q * (k.bpm / 60) * dt * dir;
+        // Left foot down at gait ≡ π/2, right at 3π/2: either on a step boundary
+        const want = Math.PI * q * k.beat * dir + Math.PI / 2;
+        let err = (want - this.gait) % Math.PI;
+        if (err > Math.PI / 2) err -= Math.PI;
+        if (err < -Math.PI / 2) err += Math.PI;
+        this.gait += err * (1 - Math.exp(-5 * dt));
+      } else this.gait += ((k.speed * dt) / stride) * Math.PI * dir;
     }
     const amp = this.gaitAmp;
     if (amp > 0.01) {
@@ -574,7 +750,9 @@ export class MotionBody {
       this.stepDur = 0.34 / p.reactionSpeed;
       this.stepDx = this.cx;
       this.stepDz = this.cz;
-      this.stepLeg = this.rng.boolean(0.5) ? 0 : 1;
+      const coin = this.rng.boolean(0.5) ? 0 : 1;
+      this.stepLeg = this.nextStepLeg >= 0 ? this.nextStepLeg : coin;
+      this.nextStepLeg = -1;
     }
     let bump = 0;
     if (this.stepT >= 0) {

@@ -2,6 +2,20 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { EngineBridge, TimelineMarker } from '../../engine/EngineBridge';
 import { MusicTrackMetadata } from '../../types/music';
 import { formatClock } from './CinematicOverlay';
+import { beatAt, intensityAt } from '../../audio/SongAnalyzer';
+import type { SectionType } from '../../audio/analysis/types';
+
+/** Section band colours: calm sections cool, loud ones warm, the drop cyan like its marker */
+const SECTION_COLOR: Record<SectionType, string> = {
+  intro: 'rgba(148,163,184,0.35)',
+  verse: 'rgba(129,140,248,0.45)',
+  build: 'rgba(251,191,36,0.6)',
+  drop: 'rgba(34,211,238,0.75)',
+  chorus: 'rgba(244,114,182,0.6)',
+  bridge: 'rgba(167,139,250,0.5)',
+  breakdown: 'rgba(56,189,248,0.35)',
+  outro: 'rgba(148,163,184,0.35)',
+};
 
 interface TransportTimelineProps {
   /** Phone landscape: play, time and scrubber only, over the picture */
@@ -58,7 +72,7 @@ export const TransportTimeline: React.FC<TransportTimelineProps> = (p) => {
     return () => clearInterval(id);
   }, [p.bridge]);
 
-  // Static layer: waveform + beat grid + drops
+  // Static layer: waveform + beat grid + sections + drops + the musical end
   useEffect(() => {
     const c = cvs.current;
     if (!c || width <= 0) return;
@@ -93,11 +107,24 @@ export const TransportTimeline: React.FC<TransportTimelineProps> = (p) => {
       const i1 = Math.max(i0 + 1, Math.floor(((x + 1) / cols) * wf.length));
       let v = 0;
       for (let i = i0; i < i1; i++) v = Math.max(v, wf[i]!);
-      const beat = Math.min(a.intensity.length - 1, Math.floor((x / cols) * a.intensity.length));
-      const hot = a.intensity[beat] ?? 0.3;
+      const hot = intensityAt(a, beatAt(a, (x / cols) * dur));
       const h = Math.max(1, v * (H - 8));
       g.fillStyle = `rgba(${Math.round(120 + hot * 110)}, ${Math.round(130 - hot * 40)}, ${Math.round(160 - hot * 50)}, ${0.35 + hot * 0.4})`;
       g.fillRect(x, mid - h / 2, 1, h);
+    }
+    // Sections: a thin band along the top, coloured by what the analysis heard
+    for (const sec of a.sections) {
+      const x0 = (sec.start / dur) * width, x1 = (sec.end / dur) * width;
+      g.fillStyle = SECTION_COLOR[sec.type];
+      g.fillRect(Math.round(x0), 0, Math.max(1, Math.round(x1 - x0) - 1), 2);
+    }
+    // After the music: silence or noise the fight does not use
+    if (a.musicalEnd < dur - 0.2 && a.ending.confidence >= 0.5) {
+      const x = (a.musicalEnd / dur) * width;
+      g.fillStyle = 'rgba(2,6,23,0.55)';
+      g.fillRect(Math.round(x), 0, width - Math.round(x), H);
+      g.fillStyle = 'rgba(148,163,184,0.5)';
+      g.fillRect(Math.round(x), 0, 1, H);
     }
     // Drops
     for (const d of a.drops) {

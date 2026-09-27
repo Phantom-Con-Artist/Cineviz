@@ -1,0 +1,132 @@
+import { it } from 'vitest';
+import { mkdirSync, writeFileSync } from 'fs';
+import { BodyConstraints } from '../src/engine/simulation/combat/Constraints';
+import { MOVES } from '../src/engine/simulation/combat/Moves';
+import { ARCHETYPES } from '../src/engine/simulation/combat/Archetypes';
+import { vocabulary, WEAPON_SETS } from '../src/engine/simulation/combat/weapons/Arsenal';
+import { entryPose, poseDistance, POSE_MATCH } from '../src/engine/simulation/combat/PoseMatch';
+import { J, JOINT_COUNT, P } from '../src/engine/simulation/combat/Skeleton';
+import type { MoveDef } from '../src/engine/simulation/combat/moves/defs';
+import { planFromSections, runShow } from '../tests/helpers/headless';
+import { measureMotion } from '../tests/helpers/motionMetrics';
+
+/**
+ * Character motion A/B: the contact / grip layer on vs off, and pose-matched vs random
+ * move selection. Writes bench/results/motion.md.
+ */
+const SEEDS = [3, 11, 19];
+const PLAN = planFromSections([{ start: 0, end: 32, type: 'intro', energy: 0.3 }, { start: 32, end: 400, type: 'verse', energy: 0.75 }]);
+const f = (v: number, d = 1) => v.toFixed(d);
+
+function floorSlide(on: boolean) {
+  BodyConstraints.enabled = on;
+  const tot: Record<string, [number, number]> = {};
+  let steps = 0, time = 0;
+  for (const seed of SEEDS) {
+    const prev = new Map<object, Float32Array>();
+    runShow({
+      seed, plan: PLAN, seconds: 60, fps: 60,
+      onFrame: (e, dt) => {
+        time += dt;
+        for (const fi of e.fighters) {
+          if (!fi.present || fi.dead) continue;
+          const j = fi.joints, p1 = prev.get(fi);
+          if (p1 && !fi.path && Math.abs(fi.motion.body[P.flip]!) < 0.5 && fi.air < 0.02) {
+            const b = fi.speed < 0.6 ? 'standing (< 0.6 m/s)' : fi.speed < 2.4 ? 'moving (0.6–2.4 m/s)' : 'skid (> 2.4 m/s)';
+            for (const tip of [J.lFoot, J.rFoot]) {
+              const k = tip * 3;
+              if (j[k + 1]! < 0.09 && p1[k + 1]! < 0.09) {
+                const s = (tot[b] ??= [0, 0]);
+                s[0] += Math.hypot(j[k]! - p1[k]!, j[k + 2]! - p1[k + 2]!);
+                s[1] += dt;
+              }
+            }
+          }
+          prev.set(fi, Float32Array.from(j));
+        }
+      },
+    }).engine.fighters.forEach((fi) => (steps += fi.constraints.feet[0].forced + fi.constraints.feet[1].forced));
+  }
+  BodyConstraints.enabled = true;
+  return { tot, stepsPerMin: (steps / time) * 60 };
+}
+
+function poseMatchAB(on: boolean) {
+  POSE_MATCH.enabled = on;
+  const names = new Set<string>(['backstep', 'sidestep', 'sidestepL', 'shoulderRoll', 'bobWeave', 'duck', 'sway', 'getUp', 'kipUp', 'rollUp']);
+  for (const a of Object.values(ARCHETYPES)) for (const d of a.dodges) names.add(d);
+  for (const s of WEAPON_SETS) for (const d of vocabulary(s).defense.dodges) names.add(d);
+  const lib = MOVES as unknown as Record<string, MoveDef>;
+  const S = new Set<MoveDef>([...names].map((n) => lib[n]!).filter(Boolean));
+  const entry: number[] = [], acc: number[] = [];
+  let sig = '';
+  for (const seed of [1, 2, 3, 4, 5, 6]) {
+    const pending: { f: { joints: Float32Array }; left: number; prev: Float32Array | null; prev2: Float32Array | null; peak: number }[] = [];
+    const log = runShow({
+      seed, plan: PLAN, seconds: 90, fps: 60,
+      setup: (e) => {
+        for (const fi of [...e.fighters, ...e.clones]) {
+          const orig = fi.play.bind(fi);
+          fi.play = (def: MoveDef, start: number, unit: number, aim?: number) => {
+            if (S.has(def)) {
+              entry.push(poseDistance(fi.motion.body, entryPose(def, fi.base)));
+              pending.push({ f: fi, left: 18, prev: null, prev2: null, peak: 0 });
+            }
+            orig(def, start, unit, aim);
+          };
+        }
+      },
+      onFrame: (_e, dt) => {
+        for (let i = pending.length - 1; i >= 0; i--) {
+          const p = pending[i]!;
+          const j = p.f.joints;
+          if (p.prev && p.prev2) for (let k = 0; k < JOINT_COUNT * 3; k += 3) {
+            p.peak = Math.max(p.peak, Math.hypot(j[k]! - 2 * p.prev[k]! + p.prev2[k]!, j[k + 1]! - 2 * p.prev[k + 1]! + p.prev2[k + 1]!, j[k + 2]! - 2 * p.prev[k + 2]! + p.prev2[k + 2]!) / (dt * dt));
+          }
+          p.prev2 = p.prev;
+          p.prev = Float32Array.from(j);
+          if (--p.left <= 0) {
+            acc.push(p.peak);
+            pending.splice(i, 1);
+          }
+        }
+      },
+    });
+    sig += log.phrases.map((x) => x.kind).join(',');
+  }
+  POSE_MATCH.enabled = true;
+  const mean = (a: number[]) => a.reduce((x, y) => x + y, 0) / a.length;
+  const med = (a: number[]) => a.slice().sort((x, y) => x - y)[Math.floor(a.length / 2)]!;
+  return { n: entry.length, entryMean: mean(entry), entryMed: med(entry), accMean: mean(acc), accMed: med(acc), sig };
+}
+
+it('motion: contacts and pose matching', () => {
+  const lines = ['# Character motion: V2 layers on vs off', '', 'Generated by `npm run bench` (bench/motion.report.ts). Headless shows (tests/helpers/headless.ts), 60 fps, both fighters.', ''];
+
+  lines.push('## Foot contact (on-floor foot slide)', '', 'Horizontal travel of a foot joint that is within 1 cm of the floor, by the body\'s ground speed (3 seeds × 60 s).', '');
+  const off = floorSlide(false), on = floorSlide(true);
+  lines.push('| Body | Off: slide (cm/s) | Off: floor time (s) | On: slide (cm/s) | On: floor time (s) | Change |', '|---|---|---|---|---|---|');
+  for (const k of Object.keys(off.tot).sort()) {
+    const [d0, t0] = off.tot[k]!, [d1, t1] = on.tot[k] ?? [0, 1];
+    lines.push(`| ${k} | ${f((d0 / t0) * 100)} | ${f(t0, 0)} | ${f((d1 / t1) * 100)} | ${f(t1, 0)} | ${f(((d1 / t1) / (d0 / t0) - 1) * 100, 0)} % |`);
+  }
+  lines.push('', `Forced (catch-up) steps: ${f(on.stepsPerMin)} per fighter-minute. Skids above 2.4 m/s slide on purpose.`, '');
+
+  lines.push('## Continuity, pops, grip and cost', '', '| Weapon | Seed | Layer | p99 joint accel (m/s²) | p99 vertical foot pop (mm) | Off-hand grip error p95 (cm) | Grip frames | ms / engine update |', '|---|---|---|---|---|---|---|---|');
+  for (const weapon of [undefined, 'spear', 'greatsword']) {
+    for (const seed of [3, 11]) {
+      for (const c of [false, true]) {
+        const m = measureMotion({ seed, seconds: 60, constraints: c, weapon });
+        lines.push(`| ${weapon ?? 'rolled'} | ${seed} | ${c ? 'on' : 'off'} | ${f(m.accelP99, 0)} | ${f(m.footPopP99 * 1000)} | ${c ? f(m.gripErrP95 * 100) : '—'} | ${c ? m.gripFrames : '—'} | ${f(m.frameMs, 3)} |`);
+      }
+    }
+  }
+
+  lines.push('', '## Pose-matched move selection (dodges, get-ups)', '', 'Paired runs: the same seeds and the same phrase plan; only which dodge / get-up is picked differs. Entry distance: weighted angle distance (rad) from the sprung body to the chosen move\'s first key. Peak acceleration: largest joint acceleration in the first 0.3 s of the move.', '');
+  const r = poseMatchAB(false), m = poseMatchAB(true);
+  lines.push('| Selection | Moves | Entry distance mean / median | Peak accel mean / median (m/s²) | Same phrase plan |', '|---|---|---|---|---|');
+  lines.push(`| random (V1) | ${r.n} | ${f(r.entryMean, 3)} / ${f(r.entryMed, 3)} | ${f(r.accMean, 0)} / ${f(r.accMed, 0)} | — |`);
+  lines.push(`| pose-matched | ${m.n} | ${f(m.entryMean, 3)} / ${f(m.entryMed, 3)} | ${f(m.accMean, 0)} / ${f(m.accMed, 0)} | ${r.sig === m.sig ? 'yes' : 'no'} |`);
+  mkdirSync('bench/results', { recursive: true });
+  writeFileSync('bench/results/motion.md', lines.join('\n') + '\n');
+});

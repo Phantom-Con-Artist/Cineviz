@@ -1,6 +1,7 @@
 import { MusicSectionType, MusicState } from '../types/music';
 import { clamp, damp } from '../utils/math';
 import { beatAt, intensityAt, SongAnalysis } from './SongAnalyzer';
+import { SongMap } from './analysis/SongMap';
 
 const FLUX_HISTORY = 48; // ~0.8 s at 60 fps
 const IDLE_BPM = 104;
@@ -16,6 +17,10 @@ const IDLE_BPM = 104;
  *    and the choreography can anticipate the next one.
  *  - Downbeat: the beat slot (of 4) with the most bass on average.
  *  - Sections: short vs long energy averages → build / drop / breakdown …
+ *
+ * With an offline analysis of the song (the normal case) the beat grid, tempo,
+ * intensity and song structure come from it instead, and this class only supplies the
+ * live, frame-by-frame response: band levels, onsets, the kick and its pulse.
  *
  * Without music the clock idles at a calm tempo so the fighters still move.
  */
@@ -44,6 +49,7 @@ export class BeatTracker {
   private candidate = 0;
   private votes = 0;
   private analysis: SongAnalysis | null = null;
+  private map: SongMap | null = null;
   private lastSongBeat = -1;
   // Kick drum: flux of the lowest bins only, against its own adaptive threshold
   private prevLow = 0;
@@ -54,6 +60,7 @@ export class BeatTracker {
   /** With an analysis the beat grid, tempo, intensity and sections come from the song itself */
   setAnalysis(a: SongAnalysis | null): void {
     this.analysis = a;
+    this.map = a ? new SongMap(a) : null;
     this.lastSongBeat = -1;
   }
 
@@ -170,6 +177,13 @@ export class BeatTracker {
     }
     s.songBeat = 0;
     s.progress = 0;
+    s.sectionConfidence = 0.3;
+    s.sectionProgress = 0;
+    s.buildProgress = 0;
+    s.dropIn = -1;
+    s.finalPeak = false;
+    s.musicEnded = false;
+    s.beatConfidence = playing ? 0.5 : 0;
 
     // Beat clock
     this.phase += (dt * this.bpm) / 60;
@@ -198,6 +212,7 @@ export class BeatTracker {
     const intensity = playing ? clamp(this.fastE / this.peakE) : 0.22;
     s.intensity = damp(s.intensity, intensity, 4, dt);
     const slope = this.fastE - this.slowE;
+    s.energyTrend = clamp(slope * 8, -1, 1);
     let next: MusicSectionType = 'verse';
     if (!playing) next = 'intro';
     else if (intensity > 0.78) next = slope > -0.04 ? 'drop' : 'chorus';
@@ -235,15 +250,27 @@ export class BeatTracker {
     s.downbeat = s.beat && s.barBeat === 0;
     const I = intensityAt(a, bf);
     s.intensity = damp(s.intensity, playing ? I : 0.15, 3, dt);
-    const ahead = intensityAt(a, bf + 8);
-    let sec: MusicSectionType = 'verse';
-    if (idx < a.introEnd) sec = 'intro';
-    else if (idx >= a.outroStart) sec = 'outro';
-    else if (a.drops.some((d) => idx >= d && idx < d + 16)) sec = 'drop';
-    else if (I > 0.75) sec = 'chorus';
-    else if (ahead > I + 0.15) sec = 'build';
-    else if (I < 0.38) sec = 'breakdown';
-    s.section = sec;
+    const m = this.map!;
+    const t = s.time;
+    const sec = m.sectionAt(t);
+    s.musicEnded = m.musicEnded(t);
+    s.sectionConfidence = sec?.confidence ?? 0;
+    s.sectionProgress = m.sectionProgress(t);
+    s.energyTrend = damp(s.energyTrend, clamp(m.energySlope(t) * 12, -1, 1), 2, dt);
+    s.buildProgress = m.buildProgress(t);
+    const drop = m.nextDrop(t);
+    s.dropIn = drop ? drop.beat - bf : -1;
+    s.finalPeak = m.isFinalPeak(t);
+    s.beatConfidence = a.beatConfidence[Math.max(0, Math.min(a.beatConfidence.length - 1, idx))] ?? 0;
+    // Structure from the analysis. The walk-in lasts until introEnd whatever the music
+    // does, and the last full-energy section is the climax
+    let label: MusicSectionType;
+    if (idx < a.introEnd) label = 'intro';
+    else if (s.musicEnded || idx >= a.outroStart) label = 'outro';
+    else if (!sec) label = 'verse';
+    else if (s.finalPeak && (sec.type === 'chorus' || sec.type === 'drop')) label = 'climax';
+    else label = sec.type === 'intro' ? 'verse' : sec.type;
+    s.section = label;
   }
 
   private estimateTempo(): void {

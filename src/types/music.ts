@@ -63,6 +63,23 @@ export interface MusicState {
   songBeat: number;
   /** 0 … 1 through the track */
   progress: number;
+  // ---- song structure (offline analysis; neutral values without one)
+  /** How sure the analysis is about the current section, 0 … 1 */
+  sectionConfidence: number;
+  /** 0 … 1 through the current section */
+  sectionProgress: number;
+  /** Energy trend: −1 falling fast … 0 steady … +1 rising fast */
+  energyTrend: number;
+  /** 0 … 1 through a build-up (0 outside one) */
+  buildProgress: number;
+  /** Beats until the next drop (−1: none ahead) */
+  dropIn: number;
+  /** In the song's last full-energy section */
+  finalPeak: boolean;
+  /** The musical content is over (silence or noise may still be playing) */
+  musicEnded: boolean;
+  /** How clearly the current beat is marked in the audio, 0 … 1 */
+  beatConfidence: number;
 }
 
 /**

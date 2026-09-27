@@ -128,7 +128,7 @@ export class MorphCloud {
       // Frame on the owner's forearm: A along the arm, C across, B = C × A
       const j = owner.joints;
       const hx = j[J.rHand * 3], hy = j[J.rHand * 3 + 1], hz = j[J.rHand * 3 + 2];
-      let ax = hx - j[J.rEl * 3], ay = hy - j[J.rEl * 3 + 1], az = hz - j[J.rEl * 3 + 2];
+      let ax = owner.blade[0]!, ay = owner.blade[1]!, az = owner.blade[2]!;
       const al = Math.hypot(ax, ay, az) || 1;
       ax /= al; ay /= al; az /= al;
       const rx = -Math.sin(owner.facing), rz = Math.cos(owner.facing);

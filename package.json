@@ -11,7 +11,10 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "build:human": "node scripts/build-human-reference.mjs",
-    "analyze:mocap": "node scripts/analyze-mocap.mjs"
+    "analyze:mocap": "node scripts/analyze-mocap.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "bench": "vitest run --config vitest.bench.config.ts"
   },
   "dependencies": {
     "@react-three/drei": "^10.0.0",
@@ -31,6 +34,7 @@
     "postcss": "^8.5.3",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.3",
-    "vite": "^6.2.0"
+    "vite": "^6.2.0",
+    "vitest": "^5.0.2"
   }
 }

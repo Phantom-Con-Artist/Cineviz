@@ -97,17 +97,29 @@ export function makePose(base: Float32Array | null, spec: PoseSpec): Float32Arra
 }
 
 // ---- tiny row-major 3x3 matrices -------------------------------------------
-type M3 = number[];
-function mul(a: M3, b: M3): M3 {
+export type M3 = number[];
+export function mul(a: M3, b: M3): M3 {
   return [
     a[0]! * b[0]! + a[1]! * b[3]! + a[2]! * b[6]!, a[0]! * b[1]! + a[1]! * b[4]! + a[2]! * b[7]!, a[0]! * b[2]! + a[1]! * b[5]! + a[2]! * b[8]!,
     a[3]! * b[0]! + a[4]! * b[3]! + a[5]! * b[6]!, a[3]! * b[1]! + a[4]! * b[4]! + a[5]! * b[7]!, a[3]! * b[2]! + a[4]! * b[5]! + a[5]! * b[8]!,
     a[6]! * b[0]! + a[7]! * b[3]! + a[8]! * b[6]!, a[6]! * b[1]! + a[7]! * b[4]! + a[8]! * b[7]!, a[6]! * b[2]! + a[7]! * b[5]! + a[8]! * b[8]!,
   ];
 }
-const rx = (t: number): M3 => { const c = Math.cos(t), s = Math.sin(t); return [1, 0, 0, 0, c, -s, 0, s, c]; };
-const ry = (t: number): M3 => { const c = Math.cos(t), s = Math.sin(t); return [c, 0, -s, 0, 1, 0, s, 0, c]; };
-const rz = (t: number): M3 => { const c = Math.cos(t), s = Math.sin(t); return [c, -s, 0, s, c, 0, 0, 0, 1]; };
+export const rx = (t: number): M3 => { const c = Math.cos(t), s = Math.sin(t); return [1, 0, 0, 0, c, -s, 0, s, c]; };
+export const ry = (t: number): M3 => { const c = Math.cos(t), s = Math.sin(t); return [c, 0, -s, 0, 1, 0, s, 0, c]; };
+export const rz = (t: number): M3 => { const c = Math.cos(t), s = Math.sin(t); return [c, -s, 0, s, c, 0, 0, 0, 1]; };
+
+/** Rotation of the torso (chest, arms, head) and of the hips (legs) for a pose */
+export function bodyFrames(p: Float32Array): { torso: M3; hips: M3 } {
+  const body = mul(ry(p[P.spin]!), rz(p[P.flip]!));
+  return {
+    torso: mul(body, mul(ry(p[P.twist]!), mul(rz(-p[P.lean]!), rx(p[P.tilt]!)))),
+    hips: mul(body, ry(p[P.twist]! * 0.3 + p[P.hipTwist]!)),
+  };
+}
+
+/** Local offset of a shoulder / hip joint from the chest / pelvis, in its frame */
+export const LIMB_ROOT_DROP = -0.03;
 
 const L = new Float32Array(JOINT_COUNT * 3);
 
@@ -141,8 +153,8 @@ const segM: M3[] = Array.from({ length: SEG_COUNT }, () => [1, 0, 0, 0, 1, 0, 0,
 
 function limb(d: Dims, side: number, root: number, a: number, b: number, c: number, pitch: number, abd: number, bend: number, frame: M3, isArm: boolean, segA: number, segB: number): void {
   const ab = rx(-side * abd);
-  if (isArm) put(a, root, frame, 0, -0.03, side * d.shoulder);
-  else put(a, root, frame, 0, -0.03, side * d.hip);
+  if (isArm) put(a, root, frame, 0, LIMB_ROOT_DROP, side * d.shoulder);
+  else put(a, root, frame, 0, LIMB_ROOT_DROP, side * d.hip);
   const first = mul(frame, mul(ab, rz(pitch)));
   put(b, a, first, 0, isArm ? -d.upper : -d.thigh, 0);
   // Elbows bend forward, knees backward
@@ -158,12 +170,11 @@ const JOINT_CLEARANCE = [0.12, 0.12, 0.06, 0, 0.07, 0.05, 0.06, 0.07, 0.05, 0.06
 /**
  * Pose → world joints (+ segment frames). The figure is dropped so its lowest
  * point touches the floor (so crouches, kneels and lying down need no IK),
- * then lifted by rootY + air.
+ * then lifted by rootY + air. `drop` overrides that floor drop (the contact layer
+ * re-solves a corrected pose at the animation's own height). Returns the drop used.
  */
-export function solvePose(p: Float32Array, out: Float32Array, wx: number, wz: number, facing: number, air: number, frames?: Float32Array, d: Readonly<Dims> = DEFAULT_DIMS): void {
-  const body = mul(ry(p[P.spin]!), rz(p[P.flip]!));
-  const torso = mul(body, mul(ry(p[P.twist]!), mul(rz(-p[P.lean]!), rx(p[P.tilt]!))));
-  const hips = mul(body, ry(p[P.twist]! * 0.3 + p[P.hipTwist]!));
+export function solvePose(p: Float32Array, out: Float32Array, wx: number, wz: number, facing: number, air: number, frames?: Float32Array, d: Readonly<Dims> = DEFAULT_DIMS, drop?: number): number {
+  const { torso, hips } = bodyFrames(p);
   const headM = mul(torso, rz(-p[P.head]!));
 
   put(J.pelvis, -1, torso, 0, 0, 0);
@@ -185,7 +196,8 @@ export function solvePose(p: Float32Array, out: Float32Array, wx: number, wz: nu
     const y = L[j * 3 + 1]! - (j === J.head ? d.headR : JOINT_CLEARANCE[j]!);
     if (y < minY) minY = y;
   }
-  const yOff = -minY + p[P.rootY]! + air;
+  const dropY = drop ?? -minY;
+  const yOff = dropY + p[P.rootY]! + air;
   const c = Math.cos(facing);
   const s = Math.sin(facing);
   const rx0 = p[P.rootX]!;
@@ -197,7 +209,7 @@ export function solvePose(p: Float32Array, out: Float32Array, wx: number, wz: nu
     out[j * 3 + 1] = L[j * 3 + 1]! + yOff;
     out[j * 3 + 2] = wz + lx * s + lz * c;
   }
-  if (!frames) return;
+  if (!frames) return dropY;
   const F = ry(facing);
   for (let k = 0; k < SEG_COUNT; k++) {
     const o = SEG_ORIGIN[k]! * 3;
@@ -208,4 +220,5 @@ export function solvePose(p: Float32Array, out: Float32Array, wx: number, wz: nu
     frames[f + 2] = out[o + 2]!;
     for (let q = 0; q < 9; q++) frames[f + 3 + q] = m[q]!;
   }
+  return dropY;
 }

@@ -1,6 +1,8 @@
 import { AudioEngine } from '../audio/AudioEngine';
 import { BeatTracker } from '../audio/BeatTracker';
 import { intensityAt, SongAnalysis } from '../audio/SongAnalyzer';
+import { SongMap } from '../audio/analysis/SongMap';
+import { clockLag, ClockState, needsResync } from './clock/Clocks';
 import { CombatEngine, NormalizedParams, SongPlan } from './simulation/combat/CombatEngine';
 import { ParticleSystem } from './simulation/particles/ParticleSystem';
 import { Director } from './director/Director';
@@ -28,7 +30,11 @@ export interface TimelineMarker {
  * The fight is slaved to the song: nothing happens until it plays, pausing
  * freezes time, seeking rebuilds the scene at that point, and a new track
  * starts the show over. The fight's beat clock is kept on the song's beat
- * grid; after bullet time it catches up with a short speed ramp.
+ * grid; after bullet time it catches up with a short speed ramp (clock/Clocks.ts).
+ *
+ * The show ends when the *music* ends, which is not always the end of the file: a
+ * tail of silence or noise after the last note plays under the finale instead of
+ * being fought through.
  */
 export class EngineBridge {
   public readonly audio: AudioEngine;
@@ -63,7 +69,10 @@ export class EngineBridge {
   private params: NormalizedParams = normalize(DEFAULT_CREATIVE_PARAMETERS);
   private trackId = -1;
   private analysis: SongAnalysis | null = null;
+  private map: SongMap | null = null;
   private ended = false;
+  /** Below this ending confidence the file's end is trusted over the detected musical end */
+  private static readonly END_CONFIDENCE = 0.5;
 
   private readonly music: MusicState = {
     time: 0,
@@ -90,6 +99,14 @@ export class EngineBridge {
     analyzed: false,
     songBeat: 0,
     progress: 0,
+    sectionConfidence: 0,
+    sectionProgress: 0,
+    energyTrend: 0,
+    buildProgress: 0,
+    dropIn: -1,
+    finalPeak: false,
+    musicEnded: false,
+    beatConfidence: 0,
   };
 
   private frameCount = 0;
@@ -173,11 +190,16 @@ export class EngineBridge {
     const a = this.analysis;
     if (a) {
       return {
-        totalBeats: a.beats.length,
+        // The fight is planned over the music, not over a tail of silence or noise
+        totalBeats: a.musicalBeats,
         introEnd: a.introEnd,
         outroStart: a.outroStart,
         drops: a.drops,
         intensity: (b) => intensityAt(a, b),
+        sections: a.sections.map((s) => ({ start: s.startBeat, end: s.endBeat, type: s.type, energy: s.energy })),
+        builds: a.builds.map((b) => ({ start: b.startBeat, end: b.endBeat })),
+        finalPeak: a.finalPeak?.beat ?? null,
+        downbeatOffset: a.downbeatOffset,
       };
     }
     // No analysis (decode failed): follow the live loudness, fixed build-up
@@ -190,6 +212,12 @@ export class EngineBridge {
       drops: [],
       intensity: () => this.music.intensity,
     };
+  }
+
+  /** The musical content is over (and the analysis is sure enough to act on it) */
+  private musicOver(): boolean {
+    const a = this.analysis;
+    return !!a && a.ending.confidence >= EngineBridge.END_CONFIDENCE && this.music.time >= a.musicalEnd;
   }
 
   /** Main per-frame tick, invoked from useFrame. Mutates buffers directly, never React state. */
@@ -207,6 +235,7 @@ export class EngineBridge {
     if (id !== this.trackId) {
       this.trackId = id;
       this.analysis = this.audio.getAnalysis();
+      this.map = this.analysis ? new SongMap(this.analysis) : null;
       this.beats.setAnalysis(this.analysis);
       this.combat.stop();
       this.initSimulation();
@@ -218,11 +247,12 @@ export class EngineBridge {
     const songBeat = this.music.analyzed ? this.music.songBeat : this.combat.beat;
 
     // Transport → show
-    if (playing && !this.combat.running) {
+    const over = this.musicOver();
+    if (playing && !this.combat.running && !over) {
       this.ended = false;
       this.combat.start(songBeat);
     } else if (this.combat.running) {
-      if (this.audio.hasEnded() && !this.ended) {
+      if ((this.audio.hasEnded() || over) && !this.ended) {
         this.ended = true;
         this.combat.finish();
       } else if (!playing && this.music.time < 0.05 && !this.ended) {
@@ -232,13 +262,14 @@ export class EngineBridge {
       } else if (playing && this.music.analyzed && songBeat < 4 && this.combat.beat > 24) {
         // Played again from the top: a new fight
         this.initSimulation();
-      } else if (this.music.analyzed && Math.abs(songBeat - this.combat.beat) > 6 && !this.ended) {
+      } else if (this.music.analyzed && needsResync(clockLag(songBeat, this.combat.beat)) && !this.ended) {
         this.combat.resync(songBeat);
       }
     }
-    if (playing && this.ended && this.music.time > 0.5) this.ended = false;
+    // Sought back into the music after the end: the fight picks up again
+    if (playing && this.ended && this.music.time > 0.5 && !over && !this.audio.hasEnded()) this.ended = false;
 
-    this.director.lag = playing && this.music.analyzed && !this.ended ? songBeat - this.combat.beat : 0;
+    this.director.lag = playing && this.music.analyzed && !this.ended ? clockLag(songBeat, this.combat.beat) : 0;
     const ts = playing || this.ended ? this.director.timeScale : 0;
     const simDt = dt * ts;
     const events = this.combat.update(simDt, this.music, this.params);
@@ -268,6 +299,22 @@ export class EngineBridge {
 
   public getAnalysis(): SongAnalysis | null {
     return this.analysis;
+  }
+
+  /** Structure queries on the current song (null without an analysis) */
+  public getSongMap(): SongMap | null {
+    return this.map;
+  }
+
+  /** The three clocks: audio (authoritative), musical (beat grid) and cinematic (the fight) */
+  public getClocks(): ClockState {
+    return {
+      audioTime: this.music.time,
+      musicalBeat: this.music.songBeat,
+      cinematicBeat: this.combat.beat,
+      lag: this.director.lag,
+      timeScale: this.director.timeScale,
+    };
   }
 
   public getParams(): Readonly<NormalizedParams> {

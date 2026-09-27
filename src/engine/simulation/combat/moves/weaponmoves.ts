@@ -32,9 +32,9 @@ export const WEAPON_MOVES = {
   // ---------------------------------------------------------------- THRUST
   w_lunge: swing(
     { twist: 0.9, rShP: 0.8, rEl: 2.0, lean: -0.15, lKn: 0.6 },
-    { twist: -0.7, rShP: 1.55, rEl: 0.02, lean: 0.55, rootX: 0.9, lHipP: 1.0, lKn: 1.05, rHipP: -0.8, rKn: 0.15 }, { power: 1.3, wt: 0.55 }),
+    { twist: -0.7, rShP: 1.55, rEl: 0.02, lean: 0.55, rootX: 0.9, lHipP: 1.0, lKn: 1.05, rHipP: -0.8, rKn: 0.15 }, { power: 1.3, wt: 0.55, thrust: true }),
   w_doubleThrust: {
-    limb: J.rHand, weapon: true, hits: [0.55],
+    limb: J.rHand, weapon: true, thrust: true, hits: [0.55],
     keys: [
       K(0.3, { twist: 0.7, rShP: 0.9, rEl: 1.9 }),
       K(0.55, { twist: -0.5, rShP: 1.5, rEl: 0.05, lean: 0.35, rootX: 0.35 }, 'snap'),
@@ -45,11 +45,11 @@ export const WEAPON_MOVES = {
   },
   w_highThrust: swing(
     { rShP: 1.6, rEl: 2.0, twist: 0.8, lean: -0.1 },
-    { rShP: 1.85, rEl: 0.05, twist: -0.6, lean: 0.35, rootX: 0.4, head: -0.1 }, { zone: 'high' }),
+    { rShP: 1.85, rEl: 0.05, twist: -0.6, lean: 0.35, rootX: 0.4, head: -0.1 }, { zone: 'high', thrust: true }),
   // A fencer's flèche: the back foot passes the front one, the point arrives first
   w_fleche: swing(
     { twist: -0.2, rShP: 1.3, rEl: 0.8, lean: 0.1, lShP: 2.2, lShA: 0.6, lEl: 1.4 },
-    { twist: -0.6, rShP: 1.6, rEl: 0.02, lean: 0.6, rootX: 1.0, rHipP: 0.9, rKn: 0.9, lHipP: -0.7, lKn: 0.3, lShP: 0.3, lShA: 0.9 }, { power: 1.2, wt: 0.5 }),
+    { twist: -0.6, rShP: 1.6, rEl: 0.02, lean: 0.6, rootX: 1.0, rHipP: 0.9, rKn: 0.9, lHipP: -0.7, lKn: 0.3, lShP: 0.3, lShA: 0.9 }, { power: 1.2, wt: 0.5, thrust: true }),
 
   // ---------------------------------------------------------------- BLUNT (two-handed where it counts)
   w_smash: swing(

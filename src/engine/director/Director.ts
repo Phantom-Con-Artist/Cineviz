@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { SlowRequest, stepTimeScale, targetTimeScale } from '../clock/Clocks';
 import { CombatEvent, PhraseKind } from '../../types/cinematic';
 import { CameraMode } from '../../types/engine';
 import { MusicState } from '../../types/music';
@@ -257,7 +258,7 @@ export class Director {
   private lastOverride = -9;
   private trauma = 0;
   private fovKick = 0;
-  private slow: { scale: number; until: number }[] = [];
+  private slow: SlowRequest[] = [];
   private lastSlow = -99;
   private clock = 0;
   private lastBeat = 0;
@@ -832,10 +833,8 @@ export class Director {
     // Time: bullet time drops fast and recovers smoothly; afterwards the fight
     // runs a little fast until it has caught up with the song (a speed ramp)
     this.slow = this.slow.filter((s) => s.until > this.clock);
-    let target = this.slow.reduce((m, s) => Math.min(m, s.scale), 1);
-    // Catch-up ramp: brisk but never cartoonish
-    if (this.slow.length === 0) target = clamp(1 + this.lag * 0.8, 0.85, 1.7);
-    this.timeScale = damp(this.timeScale, target, target < this.timeScale ? 16 : 3, dt);
+    // Catch-up ramp (engine/clock/Clocks.ts): brisk but never cartoonish
+    this.timeScale = stepTimeScale(this.timeScale, targetTimeScale(this.slow, this.lag), dt);
 
     if (!eng.running) {
       this.phrase = 'intro';
@@ -859,6 +858,10 @@ export class Director {
       if (this.lastSection && big && !this.queue.length && this.slow.length === 0 && this.shot.age > 1) {
         this.setShot(this.auraFarming(eng) ? (Math.random() < 0.5 ? 'hero' : 'wide') : Math.random() < 0.7 ? 'wide' : 'god', eng.attacker, true, eng);
         this.mark(music.section === 'drop' ? 'Drop' : 'Climax');
+      } else if (this.lastSection && music.section === 'breakdown' && !this.queue.length && this.slow.length === 0 && this.shot.age > 1) {
+        // The song pulls back: so does the camera (a slow move out, no cut)
+        this.setShot('wide', eng.attacker, false, eng);
+        this.mark('Breakdown');
       }
       this.lastSection = music.section;
     } else if (playing && !this.queue.length) {
@@ -867,7 +870,9 @@ export class Director {
         this.lastBeat = beat;
         this.shotBeats++;
         const hold = this.shot.age > this.minHold();
-        const quick = (eng.heat > 0.7 ? 0.6 : 1) * (0.75 + prm.drama * 0.6);
+        // Cuts come faster through a build and slow right down in a breakdown
+        const structure = music.section === 'breakdown' ? 1.5 : 1 - 0.4 * music.buildProgress;
+        const quick = (eng.heat > 0.7 ? 0.6 : 1) * (0.75 + prm.drama * 0.6) * structure;
         if (hold && this.shotBeats >= this.shotLen * quick && this.slow.length === 0) {
           let next = this.nextFromPool();
           // During the walk-in, keep tracking the walkers; once they stop, frame the posing
@@ -1035,11 +1040,8 @@ export class Director {
       at(J.rHand);
       at(J.pelvis);
       if (f instanceof Fighter && f.weaponOn) {
-        const h = J.rHand * 3, e = J.rEl * 3;
-        const dx = j[h]! - j[e]!, dy = j[h + 1]! - j[e + 1]!, dz = j[h + 2]! - j[e + 2]!;
-        const l = Math.hypot(dx, dy, dz) || 1;
-        const L = WEAPON_LENGTH[f.weapon];
-        push(j[h]! + (dx / l) * L, j[h + 1]! + (dy / l) * L, j[h + 2]! + (dz / l) * L);
+        const t = f.bladePoint(WEAPON_LENGTH[f.weapon]);
+        push(t[0], t[1], t[2]);
       }
     }
     if (extra) push(extra[0]!, extra[1]!, extra[2]!);

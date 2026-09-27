@@ -41,6 +41,8 @@ export interface MoveDef {
   power?: number;
   /** Aimed height, when the pose alone would mislead (sweeps, overheads) */
   zone?: Zone;
+  /** A weapon thrust: the blade stays on the line to the target and the point travels straight */
+  thrust?: boolean;
 }
 
 export const K = (t: number, p: PoseSpec, e: EaseName = 'io'): MoveKey => ({ t, p, e });
