@@ -20,18 +20,24 @@ interface CinematicViewportProps {
   children?: React.ReactNode;
   /** Show the monitor HUD (off on phones, which have their own) */
   hud?: boolean;
+  /** Use the whole area instead of a 16:9 frame (watch mode: the picture fills the screen) */
+  fill?: boolean;
 }
 
 const ASPECT = 16 / 9;
 
-/** Largest 16:9 box that fits the element */
-function useContainedFrame(ref: React.RefObject<HTMLDivElement | null>): { w: number; h: number } {
+/** Largest 16:9 box that fits the element (or all of it) */
+function useContainedFrame(ref: React.RefObject<HTMLDivElement | null>, fill: boolean): { w: number; h: number } {
   const [box, setBox] = useState({ w: 0, h: 0 });
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
     const measure = () => {
       const W = el.clientWidth, H = el.clientHeight;
+      if (fill) {
+        setBox({ w: W, h: H });
+        return;
+      }
       const w = Math.floor(Math.min(W, H * ASPECT));
       setBox({ w, h: Math.floor(w / ASPECT) });
     };
@@ -39,7 +45,7 @@ function useContainedFrame(ref: React.RefObject<HTMLDivElement | null>): { w: nu
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [ref]);
+  }, [ref, fill]);
   return box;
 }
 
@@ -47,9 +53,9 @@ function useContainedFrame(ref: React.RefObject<HTMLDivElement | null>): { w: nu
  * The monitor: a 16:9 frame as large as the space allows, centred on black.
  * Everything else in the app is arranged around it.
  */
-export const CinematicViewport: React.FC<CinematicViewportProps> = React.memo(({ settings, bridge, debug, exporter, children, hud = true }) => {
+export const CinematicViewport: React.FC<CinematicViewportProps> = React.memo(({ settings, bridge, debug, exporter, children, hud = true, fill = false }) => {
   const area = useRef<HTMLDivElement>(null);
-  const frame = useContainedFrame(area);
+  const frame = useContainedFrame(area, fill && !exporter);
   // Export: same on-screen frame, drawing buffer scaled up to the export height
   const dpr: number | [number, number] = exporter && frame.h > 0
     ? exporter.options.height / frame.h
@@ -68,7 +74,7 @@ export const CinematicViewport: React.FC<CinematicViewportProps> = React.memo(({
             <color attach="background" args={['#030308']} />
             <fog attach="fog" args={['#030308', 30, 90]} />
             {/* Camera rig: free orbit in dev mode, otherwise driven by the director */}
-            <CinematicCameraController mode={settings.cameraMode} />
+            <CinematicCameraController mode={settings.cameraMode} bridge={bridge} />
             <FightScene bridge={bridge} cameraMode={settings.cameraMode} />
             {debug && <DebugScene bridge={bridge} cameraMode={settings.cameraMode} />}
             <PostProcessingEffects enabled={effects} bridge={bridge} />

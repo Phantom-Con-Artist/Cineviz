@@ -5,7 +5,9 @@ import { TransportTimeline } from '../components/ui/TransportTimeline';
 import { CreativeStrip } from '../components/ui/CreativeStrip';
 import { DirectorPanel } from '../components/ui/DirectorPanel';
 import { DebugPanel } from '../components/ui/DebugPanel';
+import { AboutPanel } from '../components/ui/AboutPanel';
 import { RosterPanel } from '../components/ui/RosterPanel';
+import { enterFullscreen, exitFullscreen, isFullscreen, onFullscreenChange } from './fullscreen';
 import { ExportDialog } from '../components/ui/ExportDialog';
 import { MobileShell, RotatePrompt, useCompactLayout } from '../components/ui/MobileShell';
 import { formatClock } from '../components/ui/CinematicOverlay';
@@ -58,6 +60,11 @@ export const WorkstationLayout: React.FC = () => {
   const [directorOpen, setDirectorOpen] = useState(true);
   const [debug, setDebug] = useState(false);
   const [castOpen, setCastOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  /** Watch mode: nothing on screen but the fight (desktop: full screen as well) */
+  const [watch, setWatch] = useState(false);
+  /** Free cam: watch mode with the camera in the viewer's hands */
+  const [freeCam, setFreeCam] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exporter, setExporter] = useState<VideoExporter | null>(null);
   const [exportStatus, setExportStatus] = useState<ExportStatus | null>(null);
@@ -189,8 +196,12 @@ export const WorkstationLayout: React.FC = () => {
     if (bridge) bridge.debug = debug;
   }, [bridge, debug]);
 
-  // Keyboard: space = play / pause, D = debug, C = the cast
+  // Keyboard: space = play / pause, D = debug, C = the cast, W = watch mode
   const playRef = useRef<() => void>(() => {});
+  const watchRef = useRef<(on: boolean) => void>(() => {});
+  const freeRef = useRef<() => void>(() => {});
+  const watchStateRef = useRef(false);
+  watchStateRef.current = watch;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -200,6 +211,9 @@ export const WorkstationLayout: React.FC = () => {
         playRef.current();
       } else if (e.key === 'd' || e.key === 'D') setDebug((d) => !d);
       else if (e.key === 'c' || e.key === 'C') setCastOpen((o) => !o);
+      else if (e.key === 'w' || e.key === 'W') watchRef.current(!watchStateRef.current);
+      else if (e.key === 'f' || e.key === 'F') freeRef.current();
+      else if (e.key === 'Escape' && watchStateRef.current) watchRef.current(false);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -207,6 +221,63 @@ export const WorkstationLayout: React.FC = () => {
 
   const locked = !!exporter;
   const { compact, portraitPhone } = useCompactLayout();
+
+  // Watch mode. On a computer it always goes full screen, and leaving full screen (Esc)
+  // leaves watch mode too. On a phone the page is already full screen: it hides the UI.
+  const phone = compact || portraitPhone;
+  const setWatchMode = useCallback((on: boolean) => {
+    setWatch(on);
+    if (on) {
+      setCastOpen(false);
+      setAboutOpen(false);
+      if (!phone) void enterFullscreen();
+    } else if (!phone) void exitFullscreen();
+  }, [phone]);
+  watchRef.current = setWatchMode;
+  // Free cam rides on watch mode; leaving watch mode (button, Esc, W) hands the lens back
+  const toggleFreeCam = useCallback(() => {
+    if (freeCam) {
+      setWatchMode(false);
+      return;
+    }
+    setFreeCam(true);
+    setViewportSettings((s) => ({ ...s, cameraMode: 'free_cam' }));
+    setWatchMode(true);
+  }, [freeCam, setWatchMode]);
+  freeRef.current = toggleFreeCam;
+  useEffect(() => {
+    if (watch || !freeCam) return;
+    setFreeCam(false);
+    setViewportSettings((s) => ({ ...s, cameraMode: 'cinematic_director' }));
+  }, [watch, freeCam]);
+  useEffect(() => onFullscreenChange(() => {
+    if (!phone && !isFullscreen()) setWatch(false);
+  }), [phone]);
+  // Phones always play full screen: the first touch (and any touch after the browser
+  // dropped out of it) asks for it; browsers only allow it from a gesture
+  useEffect(() => {
+    if (!phone) return;
+    const go = () => { if (!isFullscreen()) void enterFullscreen(true); };
+    document.addEventListener('pointerup', go, true);
+    return () => document.removeEventListener('pointerup', go, true);
+  }, [phone]);
+  // Watch mode on a computer: the cursor and the exit hint show only while the mouse moves
+  const [watchHint, setWatchHint] = useState(false);
+  useEffect(() => {
+    if (!watch || phone) return;
+    let id = 0;
+    const move = () => {
+      setWatchHint(true);
+      window.clearTimeout(id);
+      id = window.setTimeout(() => setWatchHint(false), 2200);
+    };
+    move();
+    window.addEventListener('mousemove', move);
+    return () => {
+      window.clearTimeout(id);
+      window.removeEventListener('mousemove', move);
+    };
+  }, [watch, phone]);
 
   const handleCreativeParamsChange = (p: CreativeParameters) => {
     setCreativeParams(p);
@@ -322,7 +393,7 @@ export const WorkstationLayout: React.FC = () => {
       <>
         <MobileShell
           bridge={bridge}
-          viewport={<CinematicViewport settings={viewportSettings} bridge={bridge} debug={false} exporter={exporter} hud={false} />}
+          viewport={<CinematicViewport settings={viewportSettings} bridge={bridge} debug={false} exporter={exporter} hud={false} fill={watch} />}
           timeline={timeline(true)}
           creative={<CreativeStrip layout="sheet" parameters={creativeParams} onChange={handleCreativeParamsChange} onReset={handleResetDefaults} {...extraControls} />}
           exportBar={exportBar}
@@ -335,7 +406,14 @@ export const WorkstationLayout: React.FC = () => {
           onDirector={() => setDirectorOpen((o) => !o)}
           cast={<RosterPanel bridge={bridge} seed={seed} onClose={() => setCastOpen(false)} compact />}
           castOpen={castOpen}
-          onCast={() => setCastOpen((o) => !o)}
+          onCast={() => { setAboutOpen(false); setCastOpen((o) => !o); }}
+          about={<AboutPanel onClose={() => setAboutOpen(false)} compact />}
+          aboutOpen={aboutOpen}
+          onAbout={() => { setCastOpen(false); setAboutOpen((o) => !o); }}
+          watch={watch}
+          onWatch={() => setWatchMode(!watch)}
+          freeCam={freeCam}
+          onFreeCam={toggleFreeCam}
           onPlayPause={() => playRef.current()}
           onExport={openExport}
           sampleTracks={SAMPLE_TRACKS}
@@ -350,7 +428,7 @@ export const WorkstationLayout: React.FC = () => {
 
   return (
     <div className="flex flex-col h-[100dvh] w-screen overflow-hidden bg-[#050608] text-slate-200 select-none">
-      <TopBar
+      {!watch && <TopBar
         matchup={matchup}
         palette={palette}
         track={trackMeta?.title ?? null}
@@ -360,25 +438,38 @@ export const WorkstationLayout: React.FC = () => {
         directorOpen={directorOpen}
         onDirector={() => setDirectorOpen((o) => !o)}
         castOpen={castOpen}
-        onCast={() => setCastOpen((o) => !o)}
+        onCast={() => { setAboutOpen(false); setCastOpen((o) => !o); }}
+        aboutOpen={aboutOpen}
+        onAbout={() => { setCastOpen(false); setAboutOpen((o) => !o); }}
+        onWatch={() => setWatchMode(true)}
+        onFreeCam={toggleFreeCam}
         debug={debug}
         onDebug={() => setDebug((d) => !d)}
         exporting={locked}
         onExport={openExport}
         locked={locked}
-      />
+      />}
 
-      <main className="relative flex-1 min-h-0">
-        <CinematicViewport settings={viewportSettings} bridge={bridge} debug={debug} exporter={exporter}>
-          {bridge && <DirectorPanel bridge={bridge} open={directorOpen} onToggle={() => setDirectorOpen((o) => !o)} />}
-          {bridge && debug && <DebugPanel bridge={bridge} settings={viewportSettings} onSettings={setViewportSettings} />}
+      <main className={`relative flex-1 min-h-0 ${watch && !watchHint ? 'cursor-none' : ''}`}>
+        <CinematicViewport settings={viewportSettings} bridge={bridge} debug={debug && !watch} exporter={exporter} hud={!watch} fill={watch}>
+          {bridge && !watch && <DirectorPanel bridge={bridge} open={directorOpen} onToggle={() => setDirectorOpen((o) => !o)} />}
+          {bridge && debug && !watch && <DebugPanel bridge={bridge} settings={viewportSettings} onSettings={setViewportSettings} />}
         </CinematicViewport>
         {exportBar}
         {castOpen && <RosterPanel bridge={bridge} seed={seed} onClose={() => setCastOpen(false)} />}
+        {aboutOpen && <AboutPanel onClose={() => setAboutOpen(false)} />}
+        {watch && (
+          <button
+            onClick={() => setWatchMode(false)}
+            className={`absolute top-4 right-4 z-40 px-3 h-8 font-mono text-[10px] tracking-[0.25em] text-white/85 bg-black/50 border border-white/20 rounded-sm backdrop-blur transition-opacity duration-500 hover:text-white ${watchHint ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+          >
+            {freeCam ? 'FREE CAM · DRAG TO ROTATE · RIGHT-DRAG TO PAN · SCROLL TO ZOOM · ESC TO EXIT' : 'EXIT WATCH · ESC'}
+          </button>
+        )}
       </main>
 
-      {timeline(false)}
-      <CreativeStrip parameters={creativeParams} onChange={handleCreativeParamsChange} onReset={handleResetDefaults} {...extraControls} />
+      {!watch && timeline(false)}
+      {!watch && <CreativeStrip parameters={creativeParams} onChange={handleCreativeParamsChange} onReset={handleResetDefaults} {...extraControls} />}
 
       {dialog}
       {portraitPhone && <RotatePrompt />}

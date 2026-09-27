@@ -947,6 +947,8 @@ export class Director {
     const beatPunch = playing ? Math.pow(1 - music.beatPhase, 4) * music.beatStrength * eng.heat * 1.2 : 0;
     this.outFov = clamp(this.fov.x + this.fovKick - beatPunch, 14, 75);
     if (this.clock > this.epic.until) this.rumble = 0;
+    // The ground itself shaking: slabs landing, monoliths falling, shockwaves
+    this.trauma = Math.max(this.trauma, eng.ruin.quake * 0.55);
     this.trauma = Math.max(0, this.trauma - dt * 1.4, this.rumble * (0.85 + 0.15 * Math.sin(this.clock * 23)));
     this.blast = damp(this.blast, 0, 1.3, dt);
     const sh = this.trauma * this.trauma;

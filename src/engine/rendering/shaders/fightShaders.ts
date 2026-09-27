@@ -77,11 +77,32 @@ const FLOOR_VERT = /* glsl */ `
   uniform vec2 uTrenchK; // progress, glow
   uniform vec3 uWarp;    // x, z, strength
   uniform float uFlash;
+  uniform vec4 uSlab[12];  // x, z, radius, height
+  uniform vec4 uSlabT[12]; // slope x, slope z, rim glow
+  uniform float uRuin;
+  uniform vec3 uRuinCol;
   attribute float aRand;
   varying vec3 vColor;
   varying float vAlpha;
   void main() {
     vec3 p = position;
+    // Slabs of floor heaved up by shockwaves: lifted and tilted, their broken rims glowing
+    float rim = 0.0;
+    for (int i = 0; i < 12; i++) {
+      vec4 s = uSlab[i];
+      if (s.z <= 0.0) continue;
+      vec2 dv = p.xz - s.xy;
+      float d = length(dv);
+      if (d < s.z) {
+        vec4 t = uSlabT[i];
+        p.y += s.w + dot(t.xy, dv);
+        rim = max(rim, smoothstep(s.z * 0.78, s.z, d) * (0.5 + t.z));
+      }
+    }
+    // A ruined floor: rough, and crumbling away in places
+    p.y += (aRand - 0.5) * 0.14 * uRuin;
+    float crumble = max(0.0, aRand - (1.0 - uRuin * 0.2));
+    p.y -= crumble * 7.0;
     // Void singularity: the floor is drawn towards the centre and sinks into it
     if (uWarp.z > 0.001) {
       vec2 dv = p.xz - uWarp.xy;
@@ -140,12 +161,14 @@ const FLOOR_VERT = /* glsl */ `
       c += uLightCol[i] * exp(-d * d * 0.28) * (0.9 + uGlow);
     }
     c += vec3(1.0, 0.92, 0.85) * wave * 1.6;
+    c += uRuinCol * rim * 1.6;
+    c = mix(c, c * vec3(1.3, 0.62, 0.5), uRuin * 0.55);
     c = c * (1.0 - uDim * 0.75) + uTint * 0.12 * (1.0 - smoothstep(0.0, 26.0, r)) + vec3(0.8, 0.85, 1.0) * uFlash * 0.5;
     vColor = c;
     vec4 mv = modelViewMatrix * vec4(p, 1.0);
     gl_Position = projectionMatrix * mv;
     gl_PointSize = clamp(uScale * uPixelRatio * (0.8 + aRand * 0.7 + wave + kickWave * 1.5 + crack * 1.5 + trench * 2.0) / max(0.3, -mv.z), 1.0, 24.0);
-    vAlpha = (0.35 + wave * 1.2 + rings * 0.3 + kickWave + crack + trench) * smoothstep(28.0, 12.0, r);
+    vAlpha = (0.35 + wave * 1.2 + rings * 0.3 + kickWave + crack + trench + rim) * smoothstep(28.0, 12.0, r) * (1.0 - crumble * 2.5);
   }
 `;
 
@@ -157,24 +180,30 @@ const ROCK_VERT = /* glsl */ `
   uniform vec3 uTint;
   uniform float uPulse;
   uniform float uDim;
+  uniform vec4 uRockOff[42];
+  uniform float uRuin;
   attribute vec3 aCenter;
   attribute float aRand;
   attribute float aRock;
+  attribute float aIdx;
   varying vec3 vColor;
   varying float vAlpha;
   void main() {
+    // Where the shockwaves have thrown it, and how it has tumbled
+    vec4 off = uRockOff[int(aIdx + 0.5)];
     // Rocks tumble and rise off the ground while someone charges up
-    float a = uTime * (0.2 + aRock * 0.6) * uLevitate;
+    float a = uTime * (0.2 + aRock * 0.6) * uLevitate + off.w;
     vec3 o = position;
     o.xz = mat2(cos(a), -sin(a), sin(a), cos(a)) * o.xz;
     o.xy = mat2(cos(a * 0.7), -sin(a * 0.7), sin(a * 0.7), cos(a * 0.7)) * o.xy;
-    vec3 c = aCenter;
+    vec3 c = aCenter + off.xyz;
     c.y += uLevitate * (0.4 + aRock * 3.2) + sin(uTime * 0.8 + aRock * 30.0) * 0.12 * uLevitate + uPulse * (0.05 + aRock * 0.12);
     vec4 mv = modelViewMatrix * vec4(c + o, 1.0);
     gl_Position = projectionMatrix * mv;
     gl_PointSize = clamp(uScale * uPixelRatio * (0.9 + aRand * 0.6) / max(0.3, -mv.z), 1.0, 18.0);
     vColor = mix(vec3(0.32, 0.3, 0.42), uTint, 0.35 + uLevitate * 0.4) * (0.6 + aRand * 0.6);
     vColor *= (1.0 - uDim * 0.6) * (1.0 + uPulse * 0.4);
+    vColor = mix(vColor, vColor * vec3(1.35, 0.7, 0.55), uRuin * 0.5);
     vAlpha = 0.55 + uLevitate * 0.3;
   }
 `;
@@ -188,8 +217,21 @@ const SKY_VERT = /* glsl */ `
   uniform float uPulse;
   uniform float uDim;
   uniform float uFlash;
+  uniform float uRuin;
+  uniform vec4 uFrag[14];   // offset u, v, n and roll of each moon fragment
+  uniform vec2 uFragC[14];  // fragment centroids in the moon's plane
+  uniform vec3 uMoonC;
+  uniform vec3 uMoonU;
+  uniform vec3 uMoonV;
+  uniform vec3 uMoonN;
+  uniform float uMoonCrack;
+  uniform float uMoonBreak;
+  uniform vec3 uRift;
   attribute float aRand;
   attribute float aKind;
+  attribute float aFrag;
+  attribute vec2 aLocal;
+  attribute float aEdge;
   varying vec3 vColor;
   varying float vAlpha;
   void main() {
@@ -202,10 +244,26 @@ const SKY_VERT = /* glsl */ `
       size = 0.6 + pow(aRand, 8.0) * 3.0;
       vAlpha = 0.5 + 0.5 * w;
     } else if (aKind < 1.5) {
-      // Moon
-      vColor = uMoon * (0.8 + aRand * 0.5) * (1.0 + uPulse * 0.25);
-      size = 1.4 + aRand;
+      // Moon: each point rides its fragment (drifting, rolling), fractures glow first
+      int fi = int(aFrag + 0.5);
+      vec4 fr = uFrag[fi];
+      vec2 fc = uFragC[fi];
+      vec2 l = aLocal - fc;
+      float ca = cos(fr.w), sa = sin(fr.w);
+      l = vec2(l.x * ca - l.y * sa, l.x * sa + l.y * ca) + fc + fr.xy;
+      p = uMoonC + uMoonU * l.x + uMoonV * l.y + uMoonN * fr.z;
+      float crack = aEdge * uMoonCrack;
+      vColor = uMoon * (0.8 + aRand * 0.5) * (1.0 + uPulse * 0.25) * (1.0 - uMoonBreak * 0.3);
+      vColor += uRift * crack * (1.4 + 0.6 * sin(uTime * 3.0 + aRand * 20.0));
+      size = 1.4 + aRand + crack * 1.4;
       vAlpha = 0.9;
+    } else if (aKind > 2.5) {
+      // The moon's molten heart, spilling out between the pieces
+      vec2 l = aLocal * (0.35 + uMoonBreak * 1.1) + vec2(sin(uTime * 0.2 + aRand * 40.0), cos(uTime * 0.17 + aRand * 30.0)) * uMoonBreak * 1.5;
+      p = uMoonC + uMoonU * l.x + uMoonV * l.y - uMoonN * 0.4;
+      vColor = mix(uRift, vec3(1.0, 0.75, 0.5), aRand) * (1.5 + uPulse * 0.8);
+      size = 1.0 + aRand * 1.6;
+      vAlpha = uMoonBreak * (0.5 + 0.5 * sin(uTime * (1.0 + aRand * 3.0) + aRand * 70.0));
     } else {
       // Bokeh: soft discs drifting around the arena
       p += 0.5 * vec3(sin(uTime * 0.13 + aRand * 50.0), cos(uTime * 0.11 + aRand * 30.0), sin(uTime * 0.09 + aRand * 70.0));
@@ -214,10 +272,12 @@ const SKY_VERT = /* glsl */ `
       size = 2.0 + big * 16.0;
       vAlpha = (0.08 + 0.12 * (1.0 - big)) * (0.6 + 0.4 * sin(uTime * (0.3 + aRand) + aRand * 90.0)) * (1.0 + uPulse * 0.8);
     }
+    // A dying world: the sky burns red at the end
+    vColor = mix(vColor, vColor * vec3(1.35, 0.55, 0.5), uRuin * 0.55);
     vColor = vColor * (1.0 - uDim * 0.8) + vec3(0.75, 0.8, 1.0) * uFlash * 0.6;
     vec4 mv = modelViewMatrix * vec4(p, 1.0);
     gl_Position = projectionMatrix * mv;
-    gl_PointSize = clamp(uScale * uPixelRatio * size * (aKind < 1.5 ? 12.0 : 1.0) / max(0.3, -mv.z), 1.0, 120.0);
+    gl_PointSize = clamp(uScale * uPixelRatio * size * (aKind < 1.5 || aKind > 2.5 ? 12.0 : 1.0) / max(0.3, -mv.z), 1.0, 120.0);
   }
 `;
 
@@ -271,6 +331,10 @@ export function createFloorMaterial(): THREE.ShaderMaterial {
       uTrenchK: { value: new THREE.Vector2(0, 0) },
       uWarp: { value: new THREE.Vector3(0, 0, 0) },
       uFlash: { value: 0 },
+      uSlab: { value: Array.from({ length: 12 }, () => new THREE.Vector4()) },
+      uSlabT: { value: Array.from({ length: 12 }, () => new THREE.Vector4()) },
+      uRuin: { value: 0 },
+      uRuinCol: { value: new THREE.Color(1.0, 0.42, 0.16) },
     },
     0.35,
     0.2,
@@ -278,11 +342,22 @@ export function createFloorMaterial(): THREE.ShaderMaterial {
 }
 
 export function createRockMaterial(): THREE.ShaderMaterial {
-  return base(ROCK_VERT, { uLevitate: { value: 0 }, uTint: { value: new THREE.Color() }, uPulse: { value: 0 }, uDim: { value: 0 } }, 0.2, 0.1);
+  return base(ROCK_VERT, {
+    uLevitate: { value: 0 }, uTint: { value: new THREE.Color() }, uPulse: { value: 0 }, uDim: { value: 0 }, uRuin: { value: 0 },
+    uRockOff: { value: Array.from({ length: 42 }, () => new THREE.Vector4()) },
+  }, 0.2, 0.1);
 }
 
 export function createSkyMaterial(soft: number): THREE.ShaderMaterial {
-  return base(SKY_VERT, { uSky: { value: new THREE.Color() }, uMoon: { value: new THREE.Color() }, uPulse: { value: 0 }, uDim: { value: 0 }, uFlash: { value: 0 } }, soft, soft > 0.5 ? 0 : 0.4);
+  return base(SKY_VERT, {
+    uSky: { value: new THREE.Color() }, uMoon: { value: new THREE.Color() }, uPulse: { value: 0 }, uDim: { value: 0 }, uFlash: { value: 0 },
+    uRuin: { value: 0 },
+    uFrag: { value: Array.from({ length: 14 }, () => new THREE.Vector4()) },
+    uFragC: { value: Array.from({ length: 14 }, () => new THREE.Vector2()) },
+    uMoonC: { value: new THREE.Vector3() }, uMoonU: { value: new THREE.Vector3() }, uMoonV: { value: new THREE.Vector3() }, uMoonN: { value: new THREE.Vector3() },
+    uMoonCrack: { value: 0 }, uMoonBreak: { value: 0 },
+    uRift: { value: new THREE.Color(1.0, 0.5, 0.92) },
+  }, soft, soft > 0.5 ? 0 : 0.4);
 }
 
 /**

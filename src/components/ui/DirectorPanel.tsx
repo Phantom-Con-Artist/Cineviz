@@ -25,7 +25,7 @@ export const DirectorPanel: React.FC<DirectorPanelProps> = ({ bridge, open, onTo
       setNames(bridge.getMatchup());
     };
     tick();
-    const id = setInterval(tick, 125);
+    const id = setInterval(tick, 200);
     return () => clearInterval(id);
   }, [bridge, open]);
 

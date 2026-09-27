@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ROSTER } from '../../content/roster';
+import { CinevizMark } from './CinevizMark';
 import type { ArchetypeId } from '../../engine/simulation/combat/Archetypes';
 import { EngineBridge } from '../../engine/EngineBridge';
 import { DirectorState } from '../../engine/director/Director';
@@ -44,6 +45,14 @@ interface MobileShellProps {
   cast: React.ReactNode;
   castOpen: boolean;
   onCast: () => void;
+  about: React.ReactNode;
+  aboutOpen: boolean;
+  onAbout: () => void;
+  /** Watch mode: every control hidden, a tap shows the way out */
+  watch: boolean;
+  onWatch: () => void;
+  freeCam: boolean;
+  onFreeCam: () => void;
   onPlayPause: () => void;
   onExport: () => void;
   sampleTracks: { title: string; url: string }[];
@@ -90,7 +99,10 @@ export const MobileShell: React.FC<MobileShellProps> = (p) => {
     return () => clearInterval(id);
   }, [p.bridge, p.directorOpen]);
 
-  const shown = chrome || sheet !== null || !p.isPlaying;
+  const shown = !p.watch && (chrome || sheet !== null || !p.isPlaying);
+  useEffect(() => {
+    if (p.watch) setSheet(null);
+  }, [p.watch]);
 
   return (
     <div
@@ -104,12 +116,12 @@ export const MobileShell: React.FC<MobileShellProps> = (p) => {
           {p.viewport}
           {/* Title strip */}
           <div className={`absolute top-0 inset-x-0 z-20 flex items-center gap-3 px-3 pt-2 pb-6 text-[10px] tracking-[0.2em] bg-gradient-to-b from-black/70 to-transparent pointer-events-none transition-opacity duration-500 ${shown ? 'opacity-100' : 'opacity-0'}`}>
-            <span className="text-slate-100 tracking-[0.3em]"><span className="inline-block w-1.5 h-1.5 mr-1.5 rounded-full bg-rose-500 align-middle" />CINEVIZ</span>
+            <button onClick={p.onAbout} className={`flex items-center gap-1.5 text-slate-100 tracking-[0.3em] ${shown ? 'pointer-events-auto' : ''}`} aria-label="About Cineviz"><CinevizMark size={16} />CINEVIZ</button>
             <span className="truncate text-slate-400">{(ROSTER[p.matchup[0] as ArchetypeId]?.name ?? p.matchup[0]).toUpperCase()} vs {(ROSTER[p.matchup[1] as ArchetypeId]?.name ?? p.matchup[1]).toUpperCase()}</span>
             <span className="ml-auto truncate text-slate-500 max-w-[40%]">{p.trackTitle ?? ''}</span>
           </div>
           {/* Director read-out: one line (the phone's monitor HUD) */}
-          {p.directorOpen && dir && (
+          {p.directorOpen && dir && !p.watch && (
             <div className={`absolute left-3 bottom-14 z-20 px-2 py-1 text-[9px] tracking-[0.2em] bg-black/55 border border-white/10 rounded-sm pointer-events-none transition-opacity duration-500 ${shown ? 'opacity-100' : 'opacity-60'}`}>
               <span className="text-white">{TYPE_NAME[dir.currentShot.type]}</span>
               <span className="text-slate-500"> · {dir.timeScale.toFixed(2)}×</span>
@@ -120,12 +132,21 @@ export const MobileShell: React.FC<MobileShellProps> = (p) => {
           <div className={`absolute bottom-0 inset-x-0 z-20 bg-gradient-to-t from-black/80 to-transparent pt-4 transition-opacity duration-500 ${shown ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
             {p.timeline}
           </div>
+          {/* Watch mode: the only control is the way out, and only after a tap */}
+          {p.watch && (
+            <button
+              onClick={p.onWatch}
+              className={`absolute top-3 right-3 z-30 px-3 h-9 text-[10px] tracking-[0.25em] text-white/90 bg-black/55 border border-white/20 rounded-sm backdrop-blur transition-opacity duration-500 ${chrome ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+            >
+              {p.freeCam ? 'EXIT FREE CAM' : 'EXIT WATCH'}
+            </button>
+          )}
           {p.exportBar}
         </div>
 
         {/* Right rail */}
         <nav
-          className="relative z-30 w-[72px] shrink-0 flex flex-col items-center justify-center gap-2 border-l border-white/[0.06] bg-[#07080b]"
+          className={`relative z-30 w-[72px] shrink-0 flex-col items-center justify-center gap-1 border-l border-white/[0.06] bg-[#07080b] ${p.watch ? 'hidden' : 'flex'}`}
           style={{ paddingRight: 'env(safe-area-inset-right)' }}
         >
           <RailButton label={p.isPlaying ? 'PAUSE' : 'PLAY'} onClick={p.onPlayPause} disabled={p.locked} big>
@@ -141,11 +162,14 @@ export const MobileShell: React.FC<MobileShellProps> = (p) => {
           <RailButton label="TRACK" on={sheet === 'track'} onClick={() => setSheet(sheet === 'track' ? null : 'track')} disabled={p.locked}>
             <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg>
           </RailButton>
+          <RailButton label="WATCH" onClick={p.onWatch}>
+            <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 9V4h5M21 9V4h-5M3 15v5h5M21 15v5h-5" /></svg>
+          </RailButton>
           <RailButton label="CAST" on={p.castOpen} onClick={p.onCast}>
             <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="9" cy="8" r="3.2" /><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6" /><circle cx="17" cy="9" r="2.4" /><path d="M16 14.2c2.8.3 5 2.6 5 5.8" /></svg>
           </RailButton>
-          <RailButton label="CAM" on={p.directorOpen} onClick={p.onDirector}>
-            <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="7" width="14" height="11" rx="1" /><path d="M16 11l6-3v9l-6-3z" /></svg>
+          <RailButton label="FREE" onClick={p.onFreeCam}>
+            <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3" /><path d="M12 2v4M12 18v4M2 12h4M18 12h4" /></svg>
           </RailButton>
           <RailButton label={p.exporting ? 'REC' : 'EXPORT'} onClick={p.onExport} accent>
             <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 3v12M7 10l5 5 5-5M4 21h16" /></svg>
@@ -154,6 +178,7 @@ export const MobileShell: React.FC<MobileShellProps> = (p) => {
       </div>
 
       {p.castOpen && <div className="absolute top-0 bottom-0 left-0 right-[72px] z-40">{p.cast}</div>}
+      {p.aboutOpen && <div className="absolute top-0 bottom-0 left-0 right-[72px] z-40">{p.about}</div>}
 
       {/* Sheets slide in from the right, over the picture */}
       <div
@@ -173,6 +198,8 @@ export const MobileShell: React.FC<MobileShellProps> = (p) => {
                 <SheetItem key={t.url} onClick={() => { p.onSample(t.url, t.title); setSheet(null); }}>♪ {t.title}</SheetItem>
               ))}
               <SheetItem onClick={() => { p.onDemo(); setSheet(null); }}>Procedural demo beat</SheetItem>
+              <SheetItem onClick={() => { p.onDirector(); }}>Camera read-out: {p.directorOpen ? 'on' : 'off'}</SheetItem>
+              <SheetItem onClick={() => { p.onAbout(); setSheet(null); }}>About Cineviz</SheetItem>
               <input ref={file} type="file" accept="audio/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) { p.onFile(f); setSheet(null); } e.target.value = ''; }} />
             </div>
           )}
@@ -186,7 +213,7 @@ const RailButton: React.FC<{ label: string; onClick: () => void; children: React
   <button
     onClick={onClick}
     disabled={disabled}
-    className={`flex flex-col items-center justify-center gap-0.5 disabled:opacity-40 active:scale-95 transition-transform ${big ? 'w-14 h-14 rounded-full border border-white/20 text-white mb-1' : 'w-14 h-12 rounded-sm'} ${accent ? 'text-rose-300' : on ? 'text-cyan-300' : 'text-slate-400'}`}
+    className={`flex flex-col items-center justify-center gap-0.5 disabled:opacity-40 active:scale-95 transition-transform ${big ? 'w-14 h-14 rounded-full border border-white/20 text-white mb-1' : 'w-14 h-11 rounded-sm'} ${accent ? 'text-rose-300' : on ? 'text-cyan-300' : 'text-slate-400'}`}
   >
     {children}
     {!big && <span className="text-[8px] tracking-[0.18em]">{label}</span>}
@@ -207,6 +234,6 @@ export const RotatePrompt: React.FC = () => (
       <path d="M11 18h2" />
     </svg>
     <div className="text-[12px] tracking-[0.35em] text-slate-100">ROTATE YOUR PHONE</div>
-    <div className="text-[10px] tracking-[0.15em] text-slate-500 leading-relaxed">The fight is filmed in 16:9 — turn the phone sideways to watch it full screen.</div>
+    <div className="text-[10px] tracking-[0.15em] text-slate-500 leading-relaxed">The fight is filmed in 16:9. Turn your phone sideways to watch it full screen.</div>
   </div>
 );

@@ -1060,6 +1060,35 @@ export class ParticleSystem {
     }
   }
 
+  /**
+   * The breaking world: dust and debris where heavy things hit the ground (weighted by how
+   * heavy and how fast), and ash and embers drifting down more thickly the closer the
+   * world is to its end.
+   */
+  private ruinFx(dt: number, eng: CombatEngine): void {
+    const ru = eng.ruin;
+    for (let i = 0; i < ru.landCount; i++) {
+      const q = i * 4;
+      const x = ru.landings[q]!, z = ru.landings[q + 2]!, w = ru.landings[q + 3]!;
+      const k = Math.min(1, w / 40);
+      this.dust(x, z, Math.round(20 + k * 140), 2 + k * 6);
+      this.debris(x, z, Math.round((6 + k * 60) * this.quality.debris), 3 + k * 6, [0.5, 0.46, 0.55]);
+      this.addRipple(x, z, 0.15 + k * 0.6);
+    }
+    const lv = ru.level;
+    if (lv > 0.25) {
+      const want = (lv - 0.25) * 260 * dt * (0.4 + this.q * 0.6);
+      let n = Math.floor(want) + (R() < want % 1 ? 1 : 0);
+      while (n-- > 0) {
+        const a = R() * Math.PI * 2;
+        const r = Math.sqrt(R()) * 20;
+        const ember = R() < 0.35;
+        this.fx.emit(Math.cos(a) * r, 10 + R() * 6, Math.sin(a) * r, (R() - 0.5) * 0.6, -0.6 - R() * 1.2, (R() - 0.5) * 0.6, 7 + R() * 5,
+          ember ? [1, 0.45, 0.15] : [0.5, 0.45, 0.5], ember ? 1 + R() : 0.8 + R() * 0.8, 0.15, 0.05, 0, ember ? 1.4 : 0.5);
+      }
+    }
+  }
+
   /** Dragons: embers shed along the body, a shockwave when one roars */
   private emitDragons(eng: CombatEngine): void {
     eng.dragons.forEach((d, i) => {
@@ -1219,6 +1248,7 @@ export class ParticleSystem {
 
   private ambient(dt: number, music: MusicState, prm: NormalizedParams, eng: CombatEngine): void {
     this.musicPulse(dt, music, prm, eng);
+    this.ruinFx(dt, eng);
     if (R() < 0.6) {
       const a = R() * Math.PI * 2;
       const r = Math.sqrt(R()) * 12;

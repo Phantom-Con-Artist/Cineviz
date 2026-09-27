@@ -160,7 +160,9 @@ export class FxPool {
         this.vy[i] += dy * a;
         this.vz[i] += dz * a;
       }
-      const d = Math.exp(-this.drag[i] * dt);
+      // exp(−x) for the small x of one frame's drag: a cubic is exact to ~1e-6 and far cheaper
+      const x = this.drag[i] * dt;
+      const d = x < 0.35 ? 1 - x * (1 - x * (0.5 - x * 0.16666667)) : Math.exp(-x);
       this.vx[i] *= d;
       this.vy[i] = this.vy[i] * d - this.grav[i] * dt;
       this.vz[i] *= d;

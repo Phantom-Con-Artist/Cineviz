@@ -94,6 +94,11 @@ function anatomy(build: number, hairSeed: number): Part[] {
   return out;
 }
 
+const RATE_STEPS = 32;
+const RATE_MIN = 18;
+const RATE_SPAN = 26;
+const rateStep = (rate: number) => Math.max(0, Math.min(RATE_STEPS - 1, Math.round(((rate - RATE_MIN) / RATE_SPAN) * (RATE_STEPS - 1))));
+
 export class BodyCloud {
   readonly seg: Uint8Array;
   readonly local: Float32Array;
@@ -108,6 +113,9 @@ export class BodyCloud {
   readonly bright: Float32Array;
   readonly key: Float32Array;
   readonly rate: Float32Array;
+  /** The rate quantised to RATE_STEPS (a per-frame table replaces exp() for settled points) */
+  private readonly rateQ: Uint8Array;
+  private readonly kTab = new Float32Array(RATE_STEPS);
   /** 0 surface · 1 halo · 2 bone line · 3 eyes */
   readonly kind: Uint8Array;
   readonly shade: Float32Array;
@@ -131,6 +139,7 @@ export class BodyCloud {
     this.bright = new Float32Array(n);
     this.key = new Float32Array(n);
     this.rate = new Float32Array(n);
+    this.rateQ = new Uint8Array(n);
     this.kind = new Uint8Array(n);
     this.shade = new Float32Array(n);
     this.pos = new Float32Array(n * 3);
@@ -190,6 +199,7 @@ export class BodyCloud {
       this.kind[i] = kind;
       this.key[i] = R();
       this.rate[i] = kind === 2 ? 40 : 18 + R() * 26;
+      this.rateQ[i] = rateStep(this.rate[i]);
       this.shade[i] = clamp(part.shade + (R() - 0.5) * 0.35);
     }
   }
@@ -219,6 +229,7 @@ export class BodyCloud {
       this.shade[i] = clamp(shade + (R() - 0.5) * 0.3);
       this.key[i] = R();
       this.rate[i] = 18 + R() * 26;
+      this.rateQ[i] = rateStep(this.rate[i]);
       this.region[i] = region;
     };
     for (let i = 0; i < nEyes; i++, k++) {
@@ -353,6 +364,9 @@ export class BodyCloud {
     const c = st.colors;
     const auraGain = 1 + st.aura * 0.3 + st.superMode * 0.35;
     const drag = Math.exp(-1.6 * dt);
+    // Settled points follow at a fixed rate: one exp() per rate step per frame, not per point
+    const kTab = this.kTab;
+    for (let q = 0; q < RATE_STEPS; q++) kTab[q] = 1 - Math.exp(-(RATE_MIN + q * RATE_SPAN / (RATE_STEPS - 1)) * dt);
     const eyes = st.eyes ?? 1;
     for (let i = 0; i < this.n; i++) {
       const i3 = i * 3;
@@ -397,7 +411,7 @@ export class BodyCloud {
       } else {
         const r = this.ret[i];
         this.ret[i] = Math.min(1, r + dt * 0.7);
-        const k = 1 - Math.exp(-this.rate[i] * r * r * dt);
+        const k = r >= 1 ? kTab[this.rateQ[i]]! : 1 - Math.exp(-this.rate[i] * r * r * dt);
         this.pos[i3] += (tg[0]! - this.pos[i3]) * k;
         this.pos[i3 + 1] += (tg[1]! - this.pos[i3 + 1]) * k;
         this.pos[i3 + 2] += (tg[2]! - this.pos[i3 + 2]) * k;

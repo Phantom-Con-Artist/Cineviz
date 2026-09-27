@@ -53,7 +53,8 @@ export const TransportTimeline: React.FC<TransportTimelineProps> = (p) => {
   // Cinematic markers: the director's moments, polled
   useEffect(() => {
     if (!p.bridge) return;
-    const id = setInterval(() => setMarkers([...p.bridge!.markers]), 500);
+    // Only re-render when the director has filmed something new
+    const id = setInterval(() => setMarkers((m) => { const src = p.bridge!.markers; return m.length === src.length && m[m.length - 1] === src[src.length - 1] ? m : [...src]; }), 500);
     return () => clearInterval(id);
   }, [p.bridge]);
 

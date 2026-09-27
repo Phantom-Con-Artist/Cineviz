@@ -26,6 +26,7 @@ export class DragonCloud {
   private readonly tg = [0, 0, 0];
   /** Share of the points in use (FX quality) */
   use = 1;
+  private idle = false;
 
   constructor(readonly n: number, readonly off: number) {
     this.reg = new Uint8Array(n);
@@ -51,6 +52,14 @@ export class DragonCloud {
   update(dt: number, time: number, rigs: readonly DragonRig[], cols: readonly TeamColors[], o: Out): void {
     const active = rigs.filter((r) => r.active);
     const A = active.length;
+    // No dragon: clear the points once, then skip the loop entirely
+    if (!A) {
+      if (this.idle) return;
+      o.alpha.fill(0, this.off, this.off + this.n);
+      this.idle = true;
+      return;
+    }
+    this.idle = false;
     const lim = Math.floor(this.n * clamp(this.use, 0.2, 1));
     for (let i = 0; i < this.n; i++) {
       const k = this.off + i;

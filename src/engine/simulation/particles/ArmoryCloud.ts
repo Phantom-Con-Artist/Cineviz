@@ -15,6 +15,8 @@ const WIDTH: Partial<Record<ArmKind, number>> = { greatsword: 2.6, sword: 1.2, a
 /** Round things are drawn about their centre; the rest hang back from the tip */
 const ROUND = new Set<ArmKind>(['shuriken', 'chakram', 'orb']);
 const T = 512;
+/** Edge shimmer: a sine table walked per point instead of Math.sin per point */
+const SHIMMER = Float32Array.from({ length: 256 }, (_, i) => 0.85 + 0.15 * Math.sin((i / 256) * Math.PI * 2));
 
 /** One kind's points: distance back from the tip (0 … 1 of the length), the flat, the edge, brightness */
 interface Template {
@@ -83,6 +85,8 @@ export class ArmoryCloud {
   private readonly tpl: Map<ArmKind, Template>;
   private readonly live: ArmItem[] = [];
   private readonly share: Int32Array;
+  /** Points written last frame (only those need clearing when fewer are used) */
+  private used = 0;
 
   constructor(readonly n: number, readonly off: number) {
     this.tpl = new Map(ARM_KINDS.map((k) => [k, template(k)]));
@@ -129,8 +133,10 @@ export class ArmoryCloud {
       const glow = 1 + it.glow * 1.5;
       const smear = it.state === 'flight' ? Math.min(3, it.speed * 0.045) : 0;
       const len = ARM_LENGTH[it.kind];
+      const step = T / cnt;
+      const ph = (time * 9 * 256) / (Math.PI * 2);
       for (let q = 0; q < cnt; q++, k++) {
-        const i = Math.floor((q * T) / cnt);
+        const i = (q * step) | 0;
         const back = t.back[i]!;
         // Tip-first reveal while forming
         const fromTip = round ? 0.5 : (back * t.unit) / len;
@@ -146,7 +152,7 @@ export class ArmoryCloud {
           a *= 0.45;
         }
         // Shimmer along the edge
-        const br = t.bright[i]! * glow * (0.85 + 0.15 * Math.sin(time * 9 + i * 1.7));
+        const br = t.bright[i]! * glow * SHIMMER[((ph + i * 69) | 0) & 255]!;
         const edge = br > 1.5 ? 1 : 0;
         const K = this.off + k;
         o.pos[K * 3] = px;
@@ -159,6 +165,7 @@ export class ArmoryCloud {
         o.alpha[K] = a;
       }
     }
-    for (; k < budget; k++) o.alpha[this.off + k] = 0;
+    for (let z = k; z < this.used; z++) o.alpha[this.off + z] = 0;
+    this.used = k;
   }
 }

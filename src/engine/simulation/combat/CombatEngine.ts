@@ -15,6 +15,7 @@ import { setOfForm, vocabulary, Vocabulary, weaponSet, WeaponSet, WEAPON_SETS } 
 import { Armory } from './powers/Armory';
 import { DragonRig } from './powers/Dragon';
 import { ArenaState } from './powers/Arena';
+import { Ruin } from './powers/Ruin';
 import { buildLoadout } from './powers/Loadout';
 
 export type { WeaponType } from './Archetypes';
@@ -429,6 +430,9 @@ export class CombatEngine {
   readonly dragons: DragonRig[] = [new DragonRig(), new DragonRig(), new DragonRig()];
   /** What the big powers do to the arena (light, cracks, warp, storm) */
   readonly arena = new ArenaState();
+  /** The world wearing down as the fight goes on (see powers/Ruin.ts) */
+  readonly ruin = new Ruin();
+  private showSeed = 0;
   readonly events: CombatEvent[] = [];
   /**
    * Speedster movement: 'velocity' crosses the space at extreme speed (a streak with
@@ -478,6 +482,8 @@ export class CombatEngine {
 
   init(seed: number): void {
     this.rng = new SeededRandom(seed);
+    this.showSeed = seed;
+    this.ruin.reset(seed);
     this.running = false;
     this.timeline.length = 0;
     this.events.length = 0;
@@ -595,6 +601,8 @@ export class CombatEngine {
 
   /** Playback jumped (seek) — rebuild a sensible scene for that point in the song */
   resync(beat: number, fresh = false): void {
+    // Jumping back rebuilds the world (it wears down again from there)
+    if (beat < this.beat - 8) this.ruin.reset(this.showSeed);
     this.timeline.length = 0;
     this.pending = null;
     this.clearSpecials();
@@ -625,6 +633,7 @@ export class CombatEngine {
   /** Song over: the fighters bow out and dissolve */
   finish(): void {
     if (!this.running) return;
+    this.ruin.finale();
     this.timeline.length = 0;
     this.clearSpecials();
     const b = this.beat;
@@ -694,6 +703,7 @@ export class CombatEngine {
     this.armory.update(this.beat, simDt, this.fighters);
     for (const d of this.dragons) d.update(simDt);
     this.arena.update(simDt);
+    this.ruin.update(simDt, clamp(this.beat / Math.max(1, this.plan.totalBeats)));
     if (this.lock.active) {
       const pa = this.fighters[0].joint(J.rHand);
       const pb = this.fighters[1].joint(J.rHand);
@@ -866,6 +876,13 @@ export class CombatEngine {
 
   emit(type: CombatEventType, pos: Vector3Tuple, dir: Vector3Tuple, intensity: number, fighter: number, target: number, extra?: Partial<CombatEvent>): void {
     this.events.push({ type, pos, dir, intensity, fighter, target, ...extra });
+    // The blows that mark the world: strength, reach, damage, scar size
+    const r = this.ruin;
+    if (type === 'ultra_impact') r.impact(pos[0], pos[2], 1.4, 45, 0.12, 7);
+    else if (type === 'super_impact') r.impact(pos[0], pos[2], 0.55, 12, 0.035, 3.5);
+    else if (type === 'summon_impact') r.impact(pos[0], pos[2], 0.8, 18, 0.05, 5);
+    else if (type === 'death') r.impact(pos[0], pos[2], 0.45, 9, 0.05, 3);
+    else if (type === 'slam' && extra?.critical) r.impact(pos[0], pos[2], 0.3, 6, 0.008, this.rng.boolean(0.4) ? 2 : 0);
   }
 
   mid(): Vector3Tuple {
@@ -2969,6 +2986,7 @@ export class CombatEngine {
   // ------------------------------------------------------------------ endings
   /** The song is ending: the leader's ultra, or a quick finishing exchange if there's no time */
   private outro(s: number): void {
+    this.ruin.finale();
     this.outroDone = true;
     this.timeline.length = 0;
     this.clearSpecials();

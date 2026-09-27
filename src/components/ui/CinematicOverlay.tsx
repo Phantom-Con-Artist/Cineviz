@@ -36,7 +36,7 @@ export function formatClock(t: number, ms = true): string {
  * lines, technique captions, and a quiet monitor HUD (status, shot, camera, time, fps).
  * Driven by its own rAF loop writing styles directly — no React re-renders.
  */
-export const CinematicOverlay: React.FC<CinematicOverlayProps> = ({ bridge, recording = false, hud = true }) => {
+export const CinematicOverlay: React.FC<CinematicOverlayProps> = React.memo(({ bridge, recording = false, hud = true }) => {
   const top = useRef<HTMLDivElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
   const invert = useRef<HTMLDivElement>(null);
@@ -118,7 +118,8 @@ export const CinematicOverlay: React.FC<CinematicOverlayProps> = ({ bridge, reco
         cardVs.current.style.transform = `scale(${t < 0.5 ? 2.4 - t * 2.8 : 1 + Math.max(0, 0.05 - (t - 0.5) * 0.1)})`;
         cardVs.current.style.opacity = String(Math.min(1, Math.max(0, (t - 0.3) / 0.2)));
       }
-      const lb = d.letterbox * 11;
+      // No bars while the viewer flies the camera themselves
+      const lb = d.mode === 'free_cam' ? 0 : d.letterbox * 11;
       if (top.current) top.current.style.height = `${lb}%`;
       if (bottom.current) bottom.current.style.height = `${lb}%`;
       if (invert.current) invert.current.style.opacity = d.impactFrame > 0 ? '1' : '0';
@@ -226,4 +227,5 @@ export const CinematicOverlay: React.FC<CinematicOverlayProps> = ({ bridge, reco
       </div>
     </div>
   );
-};
+});
+CinematicOverlay.displayName = 'CinematicOverlay';

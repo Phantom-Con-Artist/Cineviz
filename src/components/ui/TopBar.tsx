@@ -1,5 +1,6 @@
 import React from 'react';
 import { ROSTER } from '../../content/roster';
+import { CinevizMark } from './CinevizMark';
 import type { ArchetypeId } from '../../engine/simulation/combat/Archetypes';
 
 /** The fighter's name for a style id (the id itself before the engine is up) */
@@ -15,6 +16,10 @@ interface TopBarProps {
   directorOpen: boolean;
   castOpen: boolean;
   onCast: () => void;
+  aboutOpen: boolean;
+  onAbout: () => void;
+  onWatch: () => void;
+  onFreeCam: () => void;
   onDirector: () => void;
   debug: boolean;
   onDebug: () => void;
@@ -25,10 +30,10 @@ interface TopBarProps {
 
 export const TopBar: React.FC<TopBarProps> = (p) => (
   <header className="flex items-center gap-6 px-4 h-10 shrink-0 border-b border-white/[0.06] bg-[#08090c] font-mono text-[10px] tracking-[0.18em] text-slate-500">
-    <div className="flex items-center gap-2 text-[11px] text-slate-100 tracking-[0.35em] shrink-0">
-      <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+    <button onClick={p.onAbout} className="flex items-center gap-2 text-[11px] text-slate-100 tracking-[0.35em] shrink-0 hover:text-white" title="About Cineviz">
+      <CinevizMark size={18} />
       CINEVIZ
-    </div>
+    </button>
 
     <Field k="SCENE" v={`${who(p.matchup[0])} vs ${who(p.matchup[1])}`} sub={p.palette.toUpperCase()} />
     <Field k="MUSIC" v={p.track ?? '—'} sub={p.bpm ? `${Math.round(p.bpm)} BPM` : undefined} className="hidden md:flex min-w-0" />
@@ -44,8 +49,27 @@ export const TopBar: React.FC<TopBarProps> = (p) => (
 
     <div className="flex-1" />
 
+    <button
+      onClick={p.onWatch}
+      disabled={p.locked}
+      className="shrink-0 flex items-center gap-1.5 px-2.5 h-7 border border-white/15 rounded-sm text-slate-200 hover:text-white hover:border-white/40 disabled:opacity-40"
+      title="Watch mode: full screen, nothing but the fight (W)"
+    >
+      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 9V4h5M21 9V4h-5M3 15v5h5M21 15v5h-5" /></svg>
+      WATCH
+    </button>
+    <button
+      onClick={p.onFreeCam}
+      disabled={p.locked}
+      className="shrink-0 flex items-center gap-1.5 px-2.5 h-7 border border-white/15 rounded-sm text-slate-200 hover:text-white hover:border-white/40 disabled:opacity-40"
+      title="Free cam: full screen, fly the camera yourself (F)"
+    >
+      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3" /><path d="M12 2v4M12 18v4M2 12h4M18 12h4" /></svg>
+      FREE CAM
+    </button>
     <Toggle on={p.castOpen} onClick={p.onCast} label="CAST" title="The fighters: who they are, their weapons and powers (C)" />
     <Toggle on={p.directorOpen} onClick={p.onDirector} label="DIRECTOR" />
+    <Toggle on={p.aboutOpen} onClick={p.onAbout} label="ABOUT" />
     <Toggle on={p.debug} onClick={p.onDebug} label="DEBUG" title="Developer overlays (D)" />
     <button
       onClick={p.onExport}
